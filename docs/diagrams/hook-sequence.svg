@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">靜默 hook 時序</title>
+  <desc id="desc">SessionStart 只恢復 exact task capsule、global user preferences 與有限摘要，UserPromptSubmit 只有非空查詢命中才注入知識；可選 semantic failure 退回 lexical 且不下載模型。PreCompact 只寫本機 marker 並繼續，Stop 不安裝 memory hook。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#365f73"/></marker>
+    <style>
+      .head { fill:#eaf4f7; stroke:#365f73; stroke-width:3; rx:16; }
+      .life { stroke:#7e9eac; stroke-width:3; stroke-dasharray:9 9; }
+      .call { stroke:#365f73; stroke-width:4; marker-end:url(#arrow); }
+      .return { stroke:#6c7f87; stroke-width:3; stroke-dasharray:8 7; marker-end:url(#arrow); }
+      .text { font-family:"Noto Sans CJK TC",sans-serif; fill:#17303d; font-size:24px; text-anchor:middle; }
+      .note { fill:#fff7e8; stroke:#a36a18; stroke-width:2; rx:12; }
+      .ok { fill:#eef9f0; stroke:#2f7551; stroke-width:2; rx:12; }
+    </style>
+  </defs>
+  <rect x="65" y="30" width="230" height="75" class="head"/><text x="180" y="78" class="text">Codex</text>
+  <rect x="480" y="30" width="240" height="75" class="head"/><text x="600" y="78" class="text">memoryctl hook</text>
+  <rect x="900" y="30" width="230" height="75" class="head"/><text x="1015" y="78" class="text">本機資料</text>
+  <line x1="180" y1="105" x2="180" y2="710" class="life"/>
+  <line x1="600" y1="105" x2="600" y2="710" class="life"/>
+  <line x1="1015" y1="105" x2="1015" y2="710" class="life"/>
+
+  <line x1="180" y1="155" x2="590" y2="155" class="call"/><text x="385" y="142" class="text">SessionStart</text>
+  <line x1="610" y1="205" x2="1005" y2="205" class="call"/><text x="810" y="192" class="text">讀 capsule + global preferences</text>
+  <line x1="1005" y1="245" x2="610" y2="245" class="return"/>
+  <line x1="590" y1="285" x2="190" y2="285" class="return"/><text x="390" y="273" class="text">adaptive pack：soft 1000 / hard 2800</text>
+
+  <line x1="180" y1="365" x2="590" y2="365" class="call"/><text x="385" y="352" class="text">UserPromptSubmit</text>
+  <rect x="730" y="320" width="390" height="105" class="note"/>
+  <text x="925" y="360" class="text">有查詢詞且命中：回 knowledge</text>
+  <text x="925" y="398" class="text">miss／semantic 失敗：lexical 或 continue</text>
+  <line x1="590" y1="445" x2="190" y2="445" class="return"/>
+
+  <line x1="180" y1="525" x2="590" y2="525" class="call"/><text x="385" y="512" class="text">PreCompact</text>
+  <line x1="610" y1="565" x2="1005" y2="565" class="call"/><text x="810" y="552" class="text">只寫 runtime marker</text>
+  <line x1="590" y1="610" x2="190" y2="610" class="return"/><text x="390" y="598" class="text">{"continue": true}</text>
+
+  <rect x="315" y="655" width="570" height="70" class="ok"/>
+  <text x="600" y="699" class="text">不安裝 memory Stop hook；不催反思、不續跑、不阻塞</text>
+</svg>

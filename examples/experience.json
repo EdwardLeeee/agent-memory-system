@@ -1,0 +1,19 @@
+{
+  "id": "experience.demo.cache_batching_slow_disk",
+  "scope": "global",
+  "source": "locally-verified",
+  "priority": "high",
+  "tags": ["demo", "cache", "batching", "outcome"],
+  "situation": "The same cache policy was exercised on a slower storage fixture.",
+  "expectation": "A batch of 20 writes would retain the best measured latency.",
+  "action": "Compared the 20-write choice with a 10-write batch under the changed fixture.",
+  "observed_outcome": "The 10-write batch completed sooner, so the earlier choice applies less broadly than expected.",
+  "decision_links": [
+    {
+      "id": "decision.demo.cache_batching",
+      "effect": "narrows"
+    }
+  ],
+  "applicability": "Only the slower-storage demonstration fixture; it is not a universal cache rule.",
+  "evidence": "A deterministic demonstration fixture showing the shape of counterevidence."
+}

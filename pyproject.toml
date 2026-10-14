@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-memory-system"
+version = "3.2.0"
+description = "Local-first durable memory for coding agents: routed context packs, action-triggered failure lessons, evidence-calibrated decisions"
+requires-python = ">=3.11"
+license = {text = "PolyForm-Noncommercial-1.0.0"}
+authors = [{name = "EdwardLeeee"}]
+dependencies = []
+
+[project.optional-dependencies]
+semantic = [
+  "huggingface-hub==1.27.0",
+  "numpy==1.26.1",
+  "onnxruntime==1.23.2",
+  "tokenizers==0.23.1",
+]
+
+[project.scripts]
+memoryctl = "agent_memory.cli:main"

@@ -1,0 +1,32 @@
+[source]
+repo = "{repo}"
+affinity = ["project:alpha"]
+orientation = ["docs/adr/"]
+
+[[parser]]
+kind = "adr"
+glob = "docs/adr/*.md"
+
+[[parser]]
+kind = "settlement"
+glob = "reports/settlements/*/*.json"
+subject_key = "name"
+version_key = "rev"
+consequences_key = "method_notes"
+errata_key = "corrections"
+errata_reason_key = "why"
+errata_field_key = "path"
+errata_claim_flag_key = "material"
+predictions_key = "calls"
+prediction_outcome_key = "result"
+prediction_miss_value = "wrong"
+prediction_hit_value = "right"
+prediction_claim_key = "what"
+prediction_provenance_key = "basis"
+prediction_house_key = "ours"
+prediction_actual_key = "real"
+prediction_error_keys = ["gap", "comment"]
+
+[[parser]]
+kind = "markdown-note"
+glob = "research/*.md"

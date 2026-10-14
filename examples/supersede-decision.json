@@ -1,0 +1,25 @@
+{
+  "scope": "global",
+  "source": "locally-verified",
+  "priority": "high",
+  "tags": ["demo", "cache", "batching"],
+  "problem": "Choose whether the demonstration cache should batch writes.",
+  "decision": "Use a workload-specific batch size; do not keep 20 as a general default.",
+  "rationale": "A measured slow-storage outcome narrowed the initial choice.",
+  "constraints": [
+    "Measure against the current workload and storage medium.",
+    "Keep the earlier version in the supersession chain."
+  ],
+  "alternatives_rejected": [
+    "Keeping 20 as a universal default conflicts with the linked outcome."
+  ],
+  "consequences": [
+    "Configuration requires a workload-specific measurement."
+  ],
+  "revisit_when": [
+    "A broader evaluation supports a stable default across storage classes."
+  ],
+  "evidence": "The linked slow-storage demonstration outcome.",
+  "change_driver": "new-evidence",
+  "change_reason": "The slow-storage outcome narrowed the applicability of the original choice."
+}

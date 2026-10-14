@@ -1,0 +1,10 @@
+{
+  "state": "active",
+  "active_task": "Run the agent-memory v3 demonstration.",
+  "paused_task": "No other demonstration task is paused.",
+  "resume_point": "The decision and its narrowing experience have been recorded.",
+  "next_action": "Inspect the context and offline audit report.",
+  "validation": "The demonstration store passed memoryctl validate.",
+  "rollback": "Delete only the temporary demonstration directory created for this walkthrough.",
+  "cwd": "/tmp/agent-memory-v3-demo"
+}

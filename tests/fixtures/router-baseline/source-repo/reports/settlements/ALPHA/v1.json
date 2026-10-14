@@ -1,0 +1,15 @@
+{
+  "name": "ALPHA",
+  "rev": "v1",
+  "method_notes": {
+    "sizing": "The capacity estimate ignored the weekend batch window."
+  },
+  "corrections": [
+    {"path": "summary", "why": "The throughput figure was copied from the v0 report and never updated.", "material": false},
+    {"path": "table.2", "why": "The throughput figure was copied from the v0 report and never updated.", "material": true}
+  ],
+  "calls": [
+    {"what": "Q3 FY27 throughput", "basis": "guidance", "result": "wrong", "ours": "900", "real": "1040", "gap": "-13.5"},
+    {"what": "Q3 FY27 error rate", "basis": "house", "result": "right", "ours": "0.4", "real": "0.4"}
+  ]
+}

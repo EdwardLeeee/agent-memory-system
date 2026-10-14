@@ -1,0 +1,74 @@
+# A federated source: one project whose own documents memoryctl indexes
+# read-only. Copy to ~/.config/agent-memory/sources.d/<name>.toml (the file
+# name is the source name), then run `memoryctl sources sync <name>`.
+# Nothing in the project changes; `memoryctl sources install-hook <name>`
+# optionally adds a post-commit line that resyncs in the background.
+#
+# Read with a minimal TOML reader: strings in double quotes, arrays of
+# strings, no inline tables.
+
+[source]
+repo = "/home/you/src/my-app"
+# Tags the entries carry; a project tag routes them to project/my-app.
+affinity = ["project:my-app"]
+# Other names a prompt may use for the project (CJK or spaced names match
+# as substrings).
+aliases = ["myapp", "the app"]
+# Files or folders named in the PROJECT LESSONS orientation line.
+orientation = ["AGENTS.md", "docs/adr/", "docs/decisions.md"]
+# Optional: read a git ref instead of the working tree. Use it when sessions
+# work on branches and the host merges main: `sources sync` fetches the
+# branch first (ten seconds at most) and reads what it fetched.
+ref = "origin/main"
+
+# Architecture decision records: one entry per file with a `## Decision`
+# section; `## Context` becomes the rationale.
+[[parser]]
+kind = "adr"
+glob = "docs/adr/*.md"
+
+# A decision log whose `##` headings are dates and `###` headings are the
+# decisions: one entry per decision.
+[[parser]]
+kind = "markdown-note"
+glob = "docs/decisions.md"
+heading_level = "3"
+
+# Notes split at `##` headings. A section whose heading or first sentence
+# records a mistake (trap, lesson, root cause, ...) becomes a lesson
+# candidate; reference_headings name hand-off sections that never are.
+[[parser]]
+kind = "markdown-note"
+glob = "docs/notes/*.md"
+reference_headings = ["Constants", "For the reviewer"]
+
+# Settlement files: JSON reports that grade earlier predictions. Every field
+# name is the project's own; nothing is assumed. Findings recurring in two or
+# more reports become generalization candidates.
+[[parser]]
+kind = "settlement"
+glob = "reports/settlements/*/*.json"
+subject_key = "name"
+version_key = "rev"
+consequences_key = "method_notes"
+errata_key = "corrections"
+errata_reason_key = "why"
+errata_field_key = "path"
+errata_claim_flag_key = "material"
+predictions_key = "calls"
+prediction_outcome_key = "result"
+prediction_miss_value = "wrong"
+prediction_hit_value = "right"
+prediction_claim_key = "what"
+prediction_provenance_key = "basis"
+prediction_house_key = "ours"
+prediction_actual_key = "real"
+prediction_error_keys = ["gap", "comment"]
+# Group corrections by a closed class field, except its catch-all value.
+group_key = "error_class"
+group_key_fallback_values = ["other"]
+
+# Commit subjects that mention a trap or lesson, as searchable notes.
+[[parser]]
+kind = "git-log"
+since = "2026-01-01"

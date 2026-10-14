@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Memory v3.1 資料流</title>
+  <desc id="desc">Canonical Markdown 產生 field-aware SQLite FTS5 與可選的本機 semantic 索引；hook 只在命中時把有界 Context Pack 傳給 agent，semantic failure 退回 lexical；專案答案另外查驗目前檔案與執行狀態。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#315c72"/>
+    </marker>
+    <style>
+      .box { fill:#f7fbfc; stroke:#315c72; stroke-width:3; rx:18; }
+      .canonical { fill:#eef9f0; stroke:#2f7551; }
+      .derived { fill:#fff7e8; stroke:#a36a18; }
+      .runtime { fill:#f7effa; stroke:#775187; }
+      .label { font-family:"Noto Sans CJK TC",sans-serif; font-size:28px; fill:#17303d; text-anchor:middle; }
+      .small { font-size:21px; fill:#415a66; }
+      .arrow { fill:none; stroke:#315c72; stroke-width:4; marker-end:url(#arrow); }
+      .dashed { stroke-dasharray:10 9; }
+    </style>
+  </defs>
+  <rect x="50" y="65" width="265" height="130" class="box"/>
+  <text x="182" y="120" class="label">使用者問題</text>
+  <text x="182" y="158" class="label small">目前意圖與限制</text>
+
+  <rect x="460" y="50" width="285" height="160" class="box runtime"/>
+  <text x="602" y="108" class="label">靜默 Hook</text>
+  <text x="602" y="148" class="label small">SessionStart / Prompt</text>
+  <text x="602" y="180" class="label small">永遠 fail-open</text>
+
+  <rect x="850" y="65" width="300" height="130" class="box"/>
+  <text x="1000" y="120" class="label">Agent 工作上下文</text>
+  <text x="1000" y="158" class="label small">只加入命中的有界資料</text>
+
+  <rect x="70" y="345" width="300" height="165" class="box canonical"/>
+  <text x="220" y="402" class="label">Canonical Ledger</text>
+  <text x="220" y="443" class="label small">Markdown + events + archive</text>
+  <text x="220" y="477" class="label small">人可讀、可驗證、可攜</text>
+
+  <rect x="450" y="345" width="300" height="165" class="box derived"/>
+  <text x="600" y="397" class="label">FTS5 + Semantic</text>
+  <text x="600" y="438" class="label small">field-aware lexical（預設）</text>
+  <text x="600" y="472" class="label small">本機向量（可選、fail-open）</text>
+  <text x="600" y="500" class="label small">scope + hash + bounded fusion</text>
+
+  <rect x="835" y="345" width="330" height="165" class="box"/>
+  <text x="1000" y="402" class="label">新鮮狀態查驗</text>
+  <text x="1000" y="443" class="label small">Repo / tests / runtime</text>
+  <text x="1000" y="477" class="label small">回答專案問題不可省略</text>
+
+  <rect x="425" y="585" width="350" height="85" class="box runtime"/>
+  <text x="600" y="638" class="label">本機 health 與 audit</text>
+
+  <path d="M315 130 H455" class="arrow"/>
+  <path d="M745 130 H845" class="arrow"/>
+  <path d="M370 427 H445" class="arrow"/>
+  <path d="M600 345 V218" class="arrow"/>
+  <path d="M1000 345 V205" class="arrow"/>
+  <path d="M220 510 C220 610 330 625 420 625" class="arrow dashed"/>
+  <path d="M750 427 C805 427 805 427 830 427" class="arrow dashed"/>
+  <path d="M600 510 V580" class="arrow dashed"/>
+</svg>

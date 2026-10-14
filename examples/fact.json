@@ -1,0 +1,9 @@
+{
+  "id": "fact.demo.index_backend",
+  "scope": "global",
+  "value": "The demonstration memory uses a local SQLite FTS5 derived index.",
+  "source": "locally-verified",
+  "evidence": "The demonstration checks memoryctl health after reindexing.",
+  "priority": "normal",
+  "tags": ["demo", "index", "sqlite"]
+}

@@ -1,0 +1,293 @@
+{
+  "analysis": "development_candidate_discrimination_ceiling",
+  "baseline_end_to_end": {
+    "cross_language_hit_at_3": 0.85,
+    "english_paraphrase_hit_at_3": 0.35,
+    "no_answer_false_positive_rate": 0.0,
+    "scope_intrusion_rate": 0.0
+  },
+  "candidate_ceiling": {
+    "categories": {
+      "cross_language": {
+        "by_shortlist": {
+          "16": {
+            "can_meet_final_hit_at_3_gate": true,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 0,
+            "missing_case_ids": [
+              "cross_language-n10",
+              "cross_language-n15",
+              "cross_language-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.85,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 17
+          },
+          "3": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 2,
+            "missing_case_ids": [
+              "cross_language-n07",
+              "cross_language-n10",
+              "cross_language-n15",
+              "cross_language-n34",
+              "cross_language-n35"
+            ],
+            "oracle_hit_at_3_ceiling": 0.75,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 15
+          },
+          "32": {
+            "can_meet_final_hit_at_3_gate": true,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 0,
+            "missing_case_ids": [
+              "cross_language-n15",
+              "cross_language-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.9,
+            "reranker_mistake_budget_at_gate": 1,
+            "targets_present": 18
+          },
+          "64": {
+            "can_meet_final_hit_at_3_gate": true,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 0,
+            "missing_case_ids": [
+              "cross_language-n15",
+              "cross_language-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.9,
+            "reranker_mistake_budget_at_gate": 1,
+            "targets_present": 18
+          },
+          "8": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 1,
+            "missing_case_ids": [
+              "cross_language-n07",
+              "cross_language-n10",
+              "cross_language-n15",
+              "cross_language-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.8,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 16
+          }
+        },
+        "cases": 20,
+        "final_hit_at_3_gate": 0.85,
+        "minimum_required_hits": 17,
+        "raw_target_ranks": {
+          "cross_language-n00": 1,
+          "cross_language-n01": 1,
+          "cross_language-n04": 2,
+          "cross_language-n05": 1,
+          "cross_language-n06": 1,
+          "cross_language-n07": 15,
+          "cross_language-n08": 1,
+          "cross_language-n10": 17,
+          "cross_language-n14": 1,
+          "cross_language-n15": null,
+          "cross_language-n17": 3,
+          "cross_language-n19": 1,
+          "cross_language-n20": 1,
+          "cross_language-n21": 1,
+          "cross_language-n24": 1,
+          "cross_language-n28": 1,
+          "cross_language-n31": 1,
+          "cross_language-n33": 1,
+          "cross_language-n34": null,
+          "cross_language-n35": 4
+        }
+      },
+      "english_paraphrase": {
+        "by_shortlist": {
+          "16": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 3,
+            "missing_case_ids": [
+              "english_paraphrase-n00",
+              "english_paraphrase-n07",
+              "english_paraphrase-n17",
+              "english_paraphrase-n19",
+              "english_paraphrase-n31",
+              "english_paraphrase-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.7,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 14
+          },
+          "3": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 8,
+            "missing_case_ids": [
+              "english_paraphrase-n00",
+              "english_paraphrase-n07",
+              "english_paraphrase-n15",
+              "english_paraphrase-n17",
+              "english_paraphrase-n19",
+              "english_paraphrase-n24",
+              "english_paraphrase-n28",
+              "english_paraphrase-n31",
+              "english_paraphrase-n33",
+              "english_paraphrase-n34",
+              "english_paraphrase-n35"
+            ],
+            "oracle_hit_at_3_ceiling": 0.45,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 9
+          },
+          "32": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 2,
+            "missing_case_ids": [
+              "english_paraphrase-n00",
+              "english_paraphrase-n17",
+              "english_paraphrase-n19",
+              "english_paraphrase-n31",
+              "english_paraphrase-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.75,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 15
+          },
+          "64": {
+            "can_meet_final_hit_at_3_gate": true,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 0,
+            "missing_case_ids": [
+              "english_paraphrase-n00",
+              "english_paraphrase-n17",
+              "english_paraphrase-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.85,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 17
+          },
+          "8": {
+            "can_meet_final_hit_at_3_gate": false,
+            "candidate_recall_margin_gate_met": false,
+            "cases": 20,
+            "hits_short_of_gate": 6,
+            "missing_case_ids": [
+              "english_paraphrase-n00",
+              "english_paraphrase-n07",
+              "english_paraphrase-n15",
+              "english_paraphrase-n17",
+              "english_paraphrase-n19",
+              "english_paraphrase-n24",
+              "english_paraphrase-n31",
+              "english_paraphrase-n33",
+              "english_paraphrase-n34"
+            ],
+            "oracle_hit_at_3_ceiling": 0.55,
+            "reranker_mistake_budget_at_gate": 0,
+            "targets_present": 11
+          }
+        },
+        "cases": 20,
+        "final_hit_at_3_gate": 0.85,
+        "minimum_required_hits": 17,
+        "raw_target_ranks": {
+          "english_paraphrase-n00": null,
+          "english_paraphrase-n01": 1,
+          "english_paraphrase-n04": 1,
+          "english_paraphrase-n05": 1,
+          "english_paraphrase-n06": 1,
+          "english_paraphrase-n07": 25,
+          "english_paraphrase-n08": 1,
+          "english_paraphrase-n10": 2,
+          "english_paraphrase-n14": 2,
+          "english_paraphrase-n15": 11,
+          "english_paraphrase-n17": null,
+          "english_paraphrase-n19": 51,
+          "english_paraphrase-n20": 2,
+          "english_paraphrase-n21": 1,
+          "english_paraphrase-n24": 9,
+          "english_paraphrase-n28": 5,
+          "english_paraphrase-n31": 42,
+          "english_paraphrase-n33": 16,
+          "english_paraphrase-n34": null,
+          "english_paraphrase-n35": 5
+        }
+      }
+    },
+    "structural_findings": {
+      "conclusion": "Do not spend reranker inference yet. Improve candidate generation on development until both language groups reach at least 95% candidate recall, then freeze the treatment before reranking.",
+      "development_hard_cases_missing_at_k32": [
+        "cross_language-n15",
+        "cross_language-n34",
+        "english_paraphrase-n00",
+        "english_paraphrase-n17",
+        "english_paraphrase-n19",
+        "english_paraphrase-n31",
+        "english_paraphrase-n34"
+      ],
+      "reranker_only_k32_rejected": true,
+      "reranker_only_k64_has_safety_margin": false,
+      "reranker_only_k64_theoretically_possible": true
+    }
+  },
+  "claim_boundary": "This is an oracle upper-bound analysis of an already cached development candidate pool. It proves when reranking cannot succeed; it does not prove that any candidate-expansion or reranking treatment will succeed.",
+  "execution": {
+    "gpt_calls": 0,
+    "held_out_queried_cases": 0,
+    "new_embedding_queries": 0,
+    "remote_model_calls": 0,
+    "reranker_calls": 0,
+    "reused_cached_candidates": true
+  },
+  "next_comparison_contract": {
+    "candidate_recall_gate": 0.95,
+    "final_hit_at_3_gate": 0.85,
+    "first_treatment": "candidate-generation-or-query-decomposition",
+    "no_answer_false_positive_rate_max": 0.1,
+    "phase": "development-only",
+    "scope_intrusion_rate_max": 0.0,
+    "semantic_query_p95_ms_max": 3000.0,
+    "stop_rules": [
+      "Reject reranker-only K<=32 without inference.",
+      "Do not open held-out while changing candidate generation.",
+      "Do not run a reranker until both language candidate-recall gates pass.",
+      "Do not enable production semantic retrieval from development evidence."
+    ],
+    "treatment_input_allowed_fields": [
+      "query",
+      "opaque_candidate_key",
+      "semantic_document_text",
+      "upstream_score"
+    ],
+    "treatment_input_forbidden_fields": [
+      "case_id",
+      "category",
+      "split",
+      "expected_id",
+      "record_id",
+      "evidence_path"
+    ]
+  },
+  "schema_version": 1,
+  "source": {
+    "index_fingerprint": "c411655359e4c611b81a3b007199deacca7dae9051aed08b2ce5607d93421758",
+    "raw_candidate_files": 60,
+    "raw_manifest_sha256": "837ab68fc2170faaf6b0dff8d40ac6161d638aa15e3ad9df8424702f4fb6ccfe",
+    "result_sha256": "c42cac72e9fa0b8ddf5769fe88648b3e325e9d292d5f905e4c981bbd1e1ac76b",
+    "suite_id": "agent-memory-retrieval-v2-sealed-20260820",
+    "suite_sha256": "bfaa35f36f1fd895e8d5356b5df25b77afbeb80a43431f92e6b7bf61fbfc0d09"
+  }
+}

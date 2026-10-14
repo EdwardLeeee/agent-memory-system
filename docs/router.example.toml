@@ -1,0 +1,168 @@
+# router.toml example (spec 記憶路由樹 v1.1). Every value below is the built-in
+# default, so copying this file to ~/.config/agent-memory/router.toml changes
+# nothing until you edit it. It is never installed automatically.
+#
+# Read with Python's tomllib: booleans and integers are bare, strings are
+# quoted. A table you keep replaces its built-in default as a whole (a
+# [[knowledge.topic]] list here is the whole topic list, not an addition).
+# A file that cannot be parsed is ignored as a whole and reported as
+# router-toml-invalid; `memoryctl validate` lists every problem.
+
+# false = the flat retrieval path, byte for byte as before the router.
+enabled = true
+
+# Knowledge topics one prompt may open (the cwd topic takes a seat first).
+knowledge_max_topics = 2
+
+# Body budgets in tokens per node. With the fixed reserve the router keeps
+# for the preamble, headings, and SOURCE IDS (claude 450, codex 370), the
+# five prompt nodes must fit the agent's prompt budget (3000 / 1800), and
+# project must be at least 400; otherwise the defaults are used and health
+# reports router-budget-invalid. project includes PROJECT LESSONS.
+# project_borrow_max: how much of knowledge's unused budget project may use.
+[budgets.claude]
+rules = 200
+project = 1200
+project_second = 300
+knowledge = 500
+facts = 350
+failures = 600
+project_borrow_max = 400
+
+[budgets.codex]
+rules = 120
+project = 700
+project_second = 150
+knowledge = 260
+facts = 200
+failures = 400
+project_borrow_max = 200
+
+# The id segments that place a global experience/decision/lesson in a project
+# (experience.myapp.x -> project/my-app). A project name's own distinctive
+# parts (four or more letters, not generic words) and its aliases already
+# count; list a segment here when the name splits into nothing distinctive.
+# A token two projects share is dropped from both and reported by
+# `memoryctl reindex`. Run reindex after editing. Nothing is built in.
+# [project_tokens]
+# "my-app" = ["myapp"]
+# "team-site-2026" = ["team_site"]
+
+# A cwd under the path opens the knowledge topic. Nothing is built in.
+# [cwd_topics]
+# "~/src/memory-tools" = "memory"
+
+# Words that open a knowledge topic besides its own name. Words with CJK or
+# spaces match as substrings of the prompt; others as whole prompt words.
+[[knowledge.topic]]
+name = "memory"
+words = ["記憶", "檢索", "hook", "memoryctl", "doctor", "golden", "索引"]
+
+[[knowledge.topic]]
+name = "web"
+words = ["web", "網站", "css", "html", "瀏覽器", "前端"]
+
+[[knowledge.topic]]
+name = "ci"
+words = ["ci", "workflow", "runner", "actions", "流水線", "工作流"]
+
+[[knowledge.topic]]
+name = "agents"
+words = ["agent", "subagent", "herdr", "codex", "代理"]
+
+[[knowledge.topic]]
+name = "ui"
+words = ["ui", "介面", "按鈕", "排版", "版面"]
+
+[[knowledge.topic]]
+name = "shell"
+words = ["shell", "bash", "zsh", "閘門", "記憶體", "磁碟"]
+
+# A topic that exists only as global failures (git) opens to show one of them.
+[[knowledge.topic]]
+name = "git"
+words = ["git", "commit", "rebase", "reset", "merge", "stash", "worktree", "分支", "合併", "提交"]
+
+# The PreToolUse speed bumps: one-step commands that cannot be undone. The
+# first time in a session a command segment matches one, the command is
+# denied once with the reason; running it again passes. false turns the
+# denials off (failure injection is separate and follows `enabled`).
+#
+# Each pattern is matched against one command segment after wrappers (sudo,
+# env, timeout, xargs ...), NAME=value words, the command's path, and git's
+# global options are removed, so it must start with ^ at the command word.
+# Write every pattern as a single-quoted literal string: in a double-quoted
+# string "\b" is a backspace and "\s" is a TOML error. This list, when
+# present, replaces the built-in one as a whole; delete it to use the
+# built-in list.
+[failures]
+speed_bump_enabled = true
+# Phrases extracted from failure records (Retry When and Symptom) that are
+# too common to mean the failure is near; explicit triggers are not filtered.
+phrase_stoplist = ["git status", "git add", "git fetch", "git log", "git diff", "gh api", "ls", "cat", "cd"]
+# Show one of your own failure records when a speed bump holds a command,
+# keyed by speed-bump id; works with the built-in list and with the list
+# below, without copying it:
+# [failures.speed_bump_failures]
+# kill-by-name = ["failure.example.pkill_matched_own_shell"]
+
+[[failures.speed_bump]]
+id = "git-force-push"
+pattern = '^git\s+push\b.*(\s(--force(-with-lease)?(=\S*)?|-[A-Za-z]*f[A-Za-z]*)(\s|$)|\s\+\S+)'
+reason = "強制推送會覆蓋遠端歷史；先確認分支與遠端狀態。"
+
+[[failures.speed_bump]]
+id = "git-reset-hard"
+pattern = '^git\s+reset\s+--hard\b'
+reason = "git reset --hard 會丟掉工作區與暫存的全部改動，無法復原。"
+
+[[failures.speed_bump]]
+id = "git-clean"
+pattern = '^git\s+clean\b.*\s(-[A-Za-z]*f[A-Za-z]*|--force)(\s|$)'
+reason = "git clean 會刪掉未追蹤的檔案，無法復原。"
+
+[[failures.speed_bump]]
+id = "git-discard-all"
+pattern = '^git\s+(checkout\s+(--\s+)?\.|restore\s+(--worktree\s+)?\.)(\s|$)'
+reason = "這會丟掉工作區的全部改動。"
+
+[[failures.speed_bump]]
+id = "git-branch-d"
+pattern = '^git\s+branch\s+-D\b'
+reason = "強制刪分支後，未合併的 commit 會失去參照。"
+
+[[failures.speed_bump]]
+id = "git-stash-destroy"
+pattern = '^git\s+stash\s+(drop|clear)\b'
+reason = "stash 由所有 worktree 共用，可能刪到別的 session 的 stash。"
+
+[[failures.speed_bump]]
+id = "rm-rf"
+pattern = '^rm(?=\s)(?=.*\s(-[A-Za-z]*[rR][A-Za-z]*|--recursive)(\s|$))'
+reason = "遞迴刪除無法復原。"
+
+[[failures.speed_bump]]
+id = "herdr-stop"
+pattern = '^herdr\s+server\s+stop\b'
+reason = "herdr server stop 會結束這台機器上所有的 Claude session。"
+
+[[failures.speed_bump]]
+id = "kill-by-name"
+pattern = '^(pkill|killall)\b|^kill\b.*\bpgrep\s+-[A-Za-z]*f\b'
+reason = "依名稱或指令列殺程序，可能殺到自己的 shell 或別的 session。"
+
+[[failures.speed_bump]]
+id = "gh-delete"
+pattern = '^gh\s+repo\s+delete\b|^gh\s+api\b.*-X\s*DELETE'
+reason = "這會刪除遠端資源。"
+
+[[failures.speed_bump]]
+id = "podman-destroy"
+pattern = '^podman\s+(system\s+prune|volume\s+rm|rm\s+-f)\b'
+reason = "這會刪除容器或資料卷。"
+
+[[failures.speed_bump]]
+id = "db-drop"
+pattern = '^(psql|mysql|mariadb|sqlite3|duckdb)\b.*\bdrop\s+(table|database)\b|^dropdb\b'
+reason = "這會刪除資料表或資料庫。"
+ignore_case = true

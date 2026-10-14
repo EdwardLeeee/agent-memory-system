@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">決策與經驗證據圖</title>
+  <desc id="desc">Working decision 連到多次 experience，結果可支持、反駁、縮小或不確定；audit 只提示，supersede 必須由明確 change driver 觸發。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#365f73"/></marker>
+    <style>
+      .decision { fill:#eaf4f7; stroke:#365f73; stroke-width:4; rx:24; }
+      .experience { fill:#fff7e8; stroke:#a36a18; stroke-width:3; rx:18; }
+      .audit { fill:#f7effa; stroke:#775187; stroke-width:3; rx:18; }
+      .new { fill:#eef9f0; stroke:#2f7551; stroke-width:4; rx:24; }
+      .arrow { stroke:#365f73; stroke-width:4; fill:none; marker-end:url(#arrow); }
+      .dashed { stroke-dasharray:10 8; }
+      .text { font-family:"Noto Sans CJK TC",sans-serif; fill:#17303d; font-size:26px; text-anchor:middle; }
+      .small { font-size:21px; fill:#435c67; }
+      .effect { font-size:20px; fill:#8a5411; }
+    </style>
+  </defs>
+  <rect x="50" y="250" width="280" height="160" class="decision"/>
+  <text x="190" y="307" class="text">Working Decision v1</text>
+  <text x="190" y="350" class="text small">一個暫時可用的選擇</text>
+  <text x="190" y="384" class="text small">不是命令，也不是永遠正確</text>
+
+  <rect x="440" y="55" width="295" height="130" class="experience"/>
+  <text x="588" y="104" class="text">Experience A</text>
+  <text x="588" y="143" class="text small">supports</text>
+  <rect x="440" y="220" width="295" height="130" class="experience"/>
+  <text x="588" y="269" class="text">Experience B</text>
+  <text x="588" y="308" class="text small">narrows</text>
+  <rect x="440" y="385" width="295" height="130" class="experience"/>
+  <text x="588" y="434" class="text">Experience C</text>
+  <text x="588" y="473" class="text small">contradicts</text>
+  <rect x="440" y="550" width="295" height="105" class="experience"/>
+  <text x="588" y="596" class="text">Experience D</text>
+  <text x="588" y="632" class="text small">inconclusive</text>
+
+  <path d="M330 300 C385 250 390 120 435 120" class="arrow"/>
+  <path d="M330 325 H435" class="arrow"/>
+  <path d="M330 350 C385 390 390 450 435 450" class="arrow"/>
+  <path d="M330 375 C385 500 390 602 435 602" class="arrow"/>
+
+  <rect x="825" y="220" width="320" height="150" class="audit"/>
+  <text x="985" y="272" class="text">離線 audit</text>
+  <text x="985" y="313" class="text small">顯示缺證據與新反證</text>
+  <text x="985" y="346" class="text small">不自動改決策</text>
+  <path d="M735 285 H820" class="arrow dashed"/>
+  <path d="M735 450 C795 450 790 350 820 330" class="arrow dashed"/>
+
+  <rect x="825" y="465" width="320" height="165" class="new"/>
+  <text x="985" y="518" class="text">Working Decision v2</text>
+  <text x="985" y="558" class="text small">只有明確 change driver</text>
+  <text x="985" y="591" class="text small">才 supersede；v1 留存</text>
+  <path d="M985 370 V460" class="arrow"/>
+</svg>

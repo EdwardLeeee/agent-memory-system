@@ -1,0 +1,554 @@
+{
+  "schema_version": 6,
+  "release": "3.1.0",
+  "evidence_updated_at": "2026-08-20T09:59:13+00:00",
+  "claim_boundary": {
+    "demonstrates": "The v1 deterministic suite measures retrieval and safety boundaries at 10,000 active records. The v2 development split compares two pinned local embedding candidates and one isolated structured-passage follow-up without opening its sealed held-out split. A zero-inference oracle analysis proves that a reranker-only K=32 treatment cannot meet the English gate on the cached candidate pool. A separate treatment-isolated 12-pair GPT-5.6 Sol max pilot measures end-to-end behavior on the frozen synthetic suite.",
+    "does_not_demonstrate": "The 160-record candidate smokes do not establish 10,000-record capacity or held-out quality. The oracle ceiling does not prove that candidate expansion or reranking will work. One completion per A/B arm and case cannot establish a stable population effect, run-to-run variance, cross-model generality, or longitudinal decision-to-outcome learning."
+  },
+  "deterministic_retrieval": {
+    "status": "complete_but_activation_gates_failed",
+    "generated_at": "2026-08-13T11:26:41+00:00",
+    "suite": {
+      "id": "agent-memory-retrieval-v1",
+      "sha256": "0dea6a662827d6f51d743cf6dd2ff64a29ae544e13b9d1c01ac2984531bc02a7",
+      "total_cases": 160,
+      "development_cases": 80,
+      "held_out_cases": 80,
+      "categories": {
+        "exact": 40,
+        "english_paraphrase": 40,
+        "cross_language": 40,
+        "no_answer": 20,
+        "scope_decoy": 20
+      }
+    },
+    "workload": {
+      "active_records": 10000,
+      "lexical_indexed_records": 10000
+    },
+    "semantic_model": {
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "revision": "a3ded7f4d0d725c6fc251504622d65b2516a3aa1",
+      "file": "onnx/model_quint8_avx2.onnx",
+      "sha256": "98a01d88b7de996cdea58c32ca71208c09968d143798814b2ea09d3439dc334f",
+      "bytes": 118453870,
+      "dimension": 384,
+      "license": "Apache-2.0"
+    },
+    "calibration": {
+      "selected_threshold": 0.29,
+      "development_semantic_hit_at_3": 0.7,
+      "development_no_answer_false_positive_rate": 0.1,
+      "development_gate_met": false,
+      "note": "The threshold was selected on the development split only; held-out results were evaluated once after selection."
+    },
+    "held_out": {
+      "exact": {
+        "cases": 20,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0
+      },
+      "english_paraphrase": {
+        "cases": 20,
+        "hit_at_1": 0.5,
+        "hit_at_3": 0.7
+      },
+      "cross_language": {
+        "cases": 20,
+        "hit_at_1": 0.5,
+        "hit_at_3": 0.75
+      },
+      "no_answer": {
+        "cases": 10,
+        "false_positive_count": 2,
+        "false_positive_rate": 0.2
+      },
+      "foreign_scope": {
+        "cases": 10,
+        "intrusion_count": 0,
+        "intrusion_rate": 0.0
+      }
+    },
+    "foreign_scope_all_splits": {
+      "cases": 20,
+      "intrusion_count": 0,
+      "intrusion_rate": 0.0,
+      "interpretation": "Lower is better. Zero means none of the intentionally foreign machine/project decoys entered the returned context."
+    },
+    "safety": {
+      "wifi_evidence_path_false_positive_absent": true,
+      "query": "memory hook architecture",
+      "forbidden_id": "benchmark.wifi.evidence_path"
+    },
+    "activation_gates": {
+      "exact_held_out_hit_at_1_at_least_0_95": true,
+      "english_paraphrase_held_out_hit_at_3_at_least_0_85": false,
+      "cross_language_held_out_hit_at_3_at_least_0_85": false,
+      "no_answer_held_out_false_positive_rate_at_most_0_10": false,
+      "foreign_scope_intrusion_zero": true,
+      "wifi_evidence_path_false_positive_absent": true,
+      "lexical_query_p95_within_250_ms": true,
+      "semantic_query_p95_within_3000_ms": true,
+      "semantic_query_peak_rss_within_500_mib": true,
+      "semantic_vector_index_within_40_mib": true
+    },
+    "performance": {
+      "lexical_index_build_ms": 1957.362,
+      "lexical_index_bytes": 18792448,
+      "lexical_query_p50_ms": 0.824,
+      "lexical_query_p95_ms": 0.883,
+      "hybrid_fusion_render_p95_ms_excluding_model": 108.504,
+      "semantic_index_build_ms": 172540,
+      "semantic_index_build_peak_rss_kib": 540260,
+      "semantic_index_bytes": 20897792,
+      "semantic_worker_query_p50_ms": 2155.007,
+      "semantic_worker_query_p95_ms": 2246.939,
+      "semantic_query_peak_rss_kib": 511716
+    },
+    "activation": {
+      "enabled": false,
+      "reason": "At least one held-out quality gate failed; semantic retrieval remains opt-in infrastructure and is disabled in production."
+    },
+    "production_snapshot_after_reindex": {
+      "checked_at": "2026-08-20T08:15:24+00:00",
+      "model_installed": true,
+      "index_status": "ready",
+      "indexed_records": 47,
+      "expected_records": 47,
+      "vector_coverage": 1.0,
+      "enabled": false,
+      "min_similarity": 0.25,
+      "calibration": null,
+      "circuit_open": false
+    }
+  },
+  "development_retrieval_v2": {
+    "status": "complete_candidate_smoke_gates_failed_held_out_unopened",
+    "generated_at": "2026-08-20T09:20:06+00:00",
+    "suite": {
+      "id": "agent-memory-retrieval-v2-sealed-20260820",
+      "sha256": "bfaa35f36f1fd895e8d5356b5df25b77afbeb80a43431f92e6b7bf61fbfc0d09",
+      "total_cases": 160,
+      "development_cases": 80,
+      "held_out_cases": 80,
+      "held_out_queried_cases": 0,
+      "cross_language_shared_ascii_alphanumeric_tokens": 0
+    },
+    "execution_policy": {
+      "remote_model_calls": 0,
+      "candidate_records": 160,
+      "candidate_semantic_queries": 60,
+      "structured_passage_follow_up_runs": 1,
+      "candidate_10000_record_pressure_tests_run": false,
+      "held_out_requires_fixed_threshold": true,
+      "stop_reason": "Both research-selected candidates failed at least one predeclared development recall gate. One isolated structured-passage follow-up left target recall unchanged, so no winner or fixed production design exists."
+    },
+    "quality_gates": {
+      "exact_hit_at_1_at_least": 0.95,
+      "english_paraphrase_hit_at_3_at_least": 0.85,
+      "cross_language_hit_at_3_at_least": 0.85,
+      "no_answer_false_positive_rate_at_most": 0.1,
+      "scope_intrusion_rate": 0.0
+    },
+    "results": [
+      {
+        "profile": "minilm-l12-v2",
+        "role": "operational_baseline",
+        "active_records": 10000,
+        "embedding_contract_sha256": "121bc3eb9b55fceb4b8bf5836e6e8b2fbad16d8884e3158aff7e1000df482559",
+        "raw_artifact": ".cache/evaluation/retrieval-v2-development-baseline/result.json",
+        "raw_result_sha256": "b9f9294e9a524380b4a1ee075cf88df261a6290213c0ffd7d4e3fc0d98dcf2ff",
+        "threshold": 0.29,
+        "metrics": {
+          "exact_hit_at_1": 1.0,
+          "english_paraphrase_hit_at_3": 0.55,
+          "cross_language_hit_at_3": 0.85,
+          "no_answer_false_positive_rate": 0.0,
+          "scope_intrusion_rate": 0.0
+        },
+        "performance": {
+          "semantic_worker_query_p95_ms": 2859.457,
+          "semantic_query_peak_rss_kib": 512288,
+          "semantic_reindex_ms": 249480,
+          "semantic_reindex_peak_rss_kib": 544648,
+          "semantic_index_bytes": 20897792
+        },
+        "development_gate_met": false,
+        "failed_gates": [
+          "english_paraphrase_hit_at_3",
+          "semantic_query_peak_rss"
+        ]
+      },
+      {
+        "profile": "multilingual-e5-small",
+        "role": "development_candidate",
+        "active_records": 160,
+        "model_revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+        "model_artifact_sha256": "dd476dd0c2514e9b9be83aeb3853fac0763e0bdf4a71645407587d77c48a2d88",
+        "embedding_contract_sha256": "188c55b7d7dbc6053dff831f281c64ae19d5373485ca29169ad1b659e7513ead",
+        "raw_artifact": ".cache/evaluation/retrieval-v2-dev-e5-smoke/result.json",
+        "raw_result_sha256": "6a351b3a6b6aa0d0323a8423d12d81452e75049f9e7b2ef71b6d92474d747daa",
+        "threshold": 0.8,
+        "metrics": {
+          "exact_hit_at_1": 1.0,
+          "english_paraphrase_hit_at_3": 0.35,
+          "cross_language_hit_at_3": 0.85,
+          "no_answer_false_positive_rate": 0.1,
+          "scope_intrusion_rate": 0.0
+        },
+        "performance": {
+          "semantic_worker_query_p95_ms": 1637.376,
+          "semantic_query_peak_rss_kib": 484968,
+          "semantic_reindex_ms": 5290,
+          "semantic_reindex_peak_rss_kib": 503904,
+          "semantic_index_bytes": 356352
+        },
+        "development_gate_met": false,
+        "failed_gates": [
+          "english_paraphrase_hit_at_3"
+        ]
+      },
+      {
+        "profile": "jina-v2-base-zh",
+        "role": "development_candidate",
+        "active_records": 160,
+        "model_revision": "c1ff9086a89a1123d7b5eff58055a665db4fb4b9",
+        "model_artifact_sha256": "0a221ee9e6a6647ccc59cee7bdd26a7b8cf0c0cd3481a65f358d9585a23f02f4",
+        "embedding_contract_sha256": "1abf9eff12c81693456408bb0c250253e0219278cb8882bccc9d0ec23a09cfbc",
+        "raw_artifact": ".cache/evaluation/retrieval-v2-dev-jina-smoke/result.json",
+        "raw_result_sha256": "56e8066aed7847ffeec6d2fa3e1baaa0894111253e0dc2956445ff1a60fb6111",
+        "threshold": 0.25,
+        "metrics": {
+          "exact_hit_at_1": 1.0,
+          "english_paraphrase_hit_at_3": 0.45,
+          "cross_language_hit_at_3": 0.6,
+          "no_answer_false_positive_rate": 0.0,
+          "scope_intrusion_rate": 0.0
+        },
+        "performance": {
+          "semantic_worker_query_p95_ms": 1060.389,
+          "semantic_query_peak_rss_kib": 269872,
+          "semantic_reindex_ms": 13940,
+          "semantic_reindex_peak_rss_kib": 278288,
+          "semantic_index_bytes": 684032
+        },
+        "development_gate_met": false,
+        "failed_gates": [
+          "english_paraphrase_hit_at_3",
+          "cross_language_hit_at_3"
+        ]
+      }
+    ],
+    "structured_passage_follow_up": {
+      "status": "complete_development_gate_failed_held_out_unopened",
+      "hypothesis": "Removing record identity, scope, tags, Evidence and Decision Links from model passages would improve English ranking while preserving cross-language recall and safety.",
+      "semantic_document_schema_version": 2,
+      "semantic_document_contract_sha256": "91797843a858a5dcbc746d00fc306444c9f4438d7a3c47a3f30b0a0cf4eb4f4f",
+      "profile": "multilingual-e5-small",
+      "active_records": 160,
+      "semantic_queries": 60,
+      "remote_model_calls": 0,
+      "held_out_queried_cases": 0,
+      "raw_artifact": ".cache/evaluation/retrieval-v2-dev-e5-structured-smoke/result.json",
+      "raw_result_sha256": "c42cac72e9fa0b8ddf5769fe88648b3e325e9d292d5f905e4c981bbd1e1ac76b",
+      "threshold": 0.81,
+      "metrics": {
+        "exact_hit_at_1": 1.0,
+        "english_paraphrase_hit_at_3": 0.35,
+        "cross_language_hit_at_3": 0.85,
+        "no_answer_false_positive_rate": 0.0,
+        "scope_intrusion_rate": 0.0
+      },
+      "performance": {
+        "semantic_worker_query_p95_ms": 1522.622,
+        "semantic_query_peak_rss_kib": 484968,
+        "semantic_reindex_ms": 3670,
+        "semantic_reindex_peak_rss_kib": 489528,
+        "semantic_index_bytes": 356352
+      },
+      "comparison_to_identity_plus_content": {
+        "english_paraphrase_hit_at_3_delta": 0.0,
+        "cross_language_hit_at_3_delta": 0.0,
+        "no_answer_false_positive_rate_delta": -0.1,
+        "semantic_reindex_ms_delta": -1620,
+        "semantic_worker_query_p95_ms_delta": -114.754
+      },
+      "development_gate_met": false,
+      "failed_gates": [
+        "english_paraphrase_hit_at_3"
+      ],
+      "conclusion": "Identity and Evidence noise was not the primary recall cause. Several English targets ranked 11 to 64 or outside top 64, so threshold tuning cannot recover them. Keep the cleaner versioned projection but do not claim a recall improvement."
+    },
+    "candidate_discrimination_ceiling": {
+      "status": "complete_cached_zero_inference_stop_rule",
+      "artifact": "docs/candidate-discrimination-ceiling.json",
+      "artifact_sha256": "f25847e1d45686d654fe940858a48e5f5c47e37c6ad1a0908c372bc43c6b6485",
+      "source_raw_result_sha256": "c42cac72e9fa0b8ddf5769fe88648b3e325e9d292d5f905e4c981bbd1e1ac76b",
+      "raw_manifest_sha256": "837ab68fc2170faaf6b0dff8d40ac6161d638aa15e3ad9df8424702f4fb6ccfe",
+      "execution": {
+        "reused_cached_candidate_files": 60,
+        "new_embedding_queries": 0,
+        "reranker_calls": 0,
+        "remote_model_calls": 0,
+        "gpt_calls": 0,
+        "held_out_queried_cases": 0
+      },
+      "raw_semantic_oracle_ceiling": {
+        "english_paraphrase": {
+          "k32_targets_present": 15,
+          "k32_cases": 20,
+          "k32_hit_at_3_ceiling": 0.75,
+          "k64_targets_present": 17,
+          "k64_cases": 20,
+          "k64_hit_at_3_ceiling": 0.85,
+          "k64_reranker_mistake_budget_at_gate": 0
+        },
+        "cross_language": {
+          "k32_targets_present": 18,
+          "k32_cases": 20,
+          "k32_hit_at_3_ceiling": 0.9,
+          "k64_targets_present": 18,
+          "k64_cases": 20,
+          "k64_hit_at_3_ceiling": 0.9,
+          "k64_reranker_mistake_budget_at_gate": 1
+        }
+      },
+      "decision": {
+        "reranker_only_k32_rejected_without_inference": true,
+        "reranker_only_k64_has_safety_margin": false,
+        "candidate_recall_gate_before_reranking": 0.95,
+        "next_variable": "development-only candidate generation or query decomposition",
+        "production_semantic_enabled": false
+      },
+      "claim_boundary": "Oracle analysis proves when a reranker cannot meet the gate on the cached development candidate pool. It does not prove that candidate expansion or reranking will improve retrieval."
+    },
+    "activation": {
+      "enabled": false,
+      "winner": null,
+      "held_out_opened": false,
+      "reason": "No candidate or structured-passage follow-up passed every development quality gate; production remains on lexical retrieval."
+    },
+    "production_snapshot_after_adapter_change": {
+      "checked_at": "2026-08-20T09:42:05+00:00",
+      "active_records": 49,
+      "enabled": false,
+      "model_installed": false,
+      "index_status": "invalid",
+      "indexed_records": 47,
+      "expected_records": 49,
+      "semantic_index_schema_version_expected": 3,
+      "semantic_document_schema_version": 2,
+      "semantic_document_contract_sha256": "91797843a858a5dcbc746d00fc306444c9f4438d7a3c47a3f30b0a0cf4eb4f4f",
+      "reason": "The prior schema-1 derived model manifest and vector index do not satisfy the new embedding and semantic-document contracts or schema-3 checks. No production setup or reindex was run because development recall gates failed. Lexical retrieval is unaffected."
+    }
+  },
+  "end_to_end_ab": {
+    "status": "complete_minimum_paired_pilot",
+    "valid_effect_result": {
+      "eligible_for_effect_claims": true,
+      "generated_at": "2026-08-20T08:03:57+00:00",
+      "raw_artifact": ".cache/evaluation/codex-memory-ab-v2-sol-max-protocol4/result.json",
+      "raw_result_sha256": "0bc7f7a4dc1f109511bfa2dba732a24b778a0428a0fd9336796053e8c528e8b6",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "max",
+      "codex_version": "codex-cli 0.148.0",
+      "prompt_protocol_version": 4,
+      "calls": {
+        "completed": 24,
+        "planned": 24,
+        "complete_pairs": 12,
+        "incomplete_pairs": 0
+      },
+      "paired": {
+        "overall": {
+          "memory_on_passes": 11,
+          "memory_off_passes": 3,
+          "pairs": 12,
+          "memory_on_pass_rate": 0.9167,
+          "memory_off_pass_rate": 0.25,
+          "absolute_pass_rate_delta": 0.6667,
+          "memory_on_wins": 8,
+          "memory_off_wins": 0,
+          "both_pass": 3,
+          "both_fail": 1
+        },
+        "retrieval": {
+          "memory_on_passes": 5,
+          "memory_off_passes": 3,
+          "pairs": 6,
+          "memory_on_pass_rate": 0.8333,
+          "memory_off_pass_rate": 0.5,
+          "absolute_pass_rate_delta": 0.3333,
+          "memory_on_wins": 2,
+          "memory_off_wins": 0,
+          "both_pass": 3,
+          "both_fail": 1
+        },
+        "compact_resume": {
+          "memory_on_passes": 6,
+          "memory_off_passes": 0,
+          "pairs": 6,
+          "memory_on_pass_rate": 1.0,
+          "memory_off_pass_rate": 0.0,
+          "absolute_pass_rate_delta": 1.0,
+          "memory_on_wins": 6,
+          "memory_off_wins": 0,
+          "both_pass": 0,
+          "both_fail": 0
+        }
+      },
+      "condition_aggregates": {
+        "retrieval": {
+          "memory_on": {
+            "calls": 6,
+            "pass_rate": 0.8333,
+            "forbidden_adoption_rate": 0.1667,
+            "median_latency_ms": 19562.601
+          },
+          "memory_off": {
+            "calls": 6,
+            "pass_rate": 0.5,
+            "forbidden_adoption_rate": 0.5,
+            "median_latency_ms": 19862.745
+          }
+        },
+        "compact_resume": {
+          "memory_on": {
+            "calls": 6,
+            "pass_rate": 1.0,
+            "forbidden_adoption_rate": 0.0,
+            "median_latency_ms": 28717.878
+          },
+          "memory_off": {
+            "calls": 6,
+            "pass_rate": 0.0,
+            "forbidden_adoption_rate": 0.0,
+            "median_latency_ms": 51767.084
+          }
+        }
+      },
+      "usage_by_condition": {
+        "memory_on": {
+          "input_tokens": 506982,
+          "cached_input_tokens": 268288,
+          "output_tokens": 9831
+        },
+        "memory_off": {
+          "input_tokens": 909788,
+          "cached_input_tokens": 671232,
+          "output_tokens": 17511
+        }
+      },
+      "case_diagnostics": {
+        "memory_on_wins": [
+          "ab-paraphrase-history",
+          "ab-exact-history",
+          "ab-resume-mobile-qa",
+          "ab-resume-parser-repair",
+          "ab-resume-memory-eval",
+          "ab-resume-solver-ci",
+          "ab-resume-api-migration",
+          "ab-resume-report-pdf"
+        ],
+        "memory_off_wins": [],
+        "both_pass": [
+          "ab-stale-memory-live-file",
+          "ab-foreign-scope",
+          "ab-evidence-only-no-answer"
+        ],
+        "both_fail": [
+          "ab-cross-language-history"
+        ],
+        "cross_language_failure": "The memory-on hook ran but lexical retrieval produced a zero-byte context while semantic retrieval remained disabled; both arms returned UNKNOWN.",
+        "scope_safety": "Both arms passed and neither adopted a foreign machine or project token. The retrieval forbidden-adoption metric is not the foreign-scope intrusion metric."
+      },
+      "claim_boundary": "This is a minimum one-completion-per-arm paired pilot over 12 synthetic cases. It supports a large directional benefit in this suite but does not estimate stable variance or longitudinal learning."
+    },
+    "requested_model": "gpt-5.6-sol",
+    "reasoning_effort": "max",
+    "corrected_protocol": {
+      "version": 4,
+      "suite_id": "agent-memory-codex-ab-v2",
+      "suite_sha256": "6ce2f3039cebcc8a09c8aafbbd596aa6035b8c7325a631c64045d5b0e97d2809",
+      "planned_calls": 24,
+      "retrieval_pairs": 6,
+      "compact_resume_pairs": 6,
+      "conditions": [
+        "memory_off",
+        "memory_on"
+      ],
+      "filesystem_isolation": "bubblewrap-v1",
+      "completed_calls": 24,
+      "complete_pairs": 12,
+      "preflight": {
+        "status": "passed",
+        "total_runs": 24,
+        "hook_invocations": 12,
+        "memory_on_nonempty_contexts": 9,
+        "memory_off_nonempty_contexts": 0,
+        "contract_failures": 0,
+        "note": "Three memory-on retrieval cases are expected to be silent: lexical cross-language miss, Evidence-only no-answer, and foreign-scope rejection."
+      },
+      "isolation_contract": {
+        "fixture_visible": true,
+        "host_home_hidden": true,
+        "suite_source_hidden": true,
+        "sibling_runs_hidden": true,
+        "memoryctl_hidden": true,
+        "resolver_config_readable": true,
+        "resolver_symlink_target_mounted_read_only": true,
+        "matching_code_mode_host_mounted_read_only": true,
+        "preflight_required": true
+      },
+      "transport_preflight": {
+        "status": "passed",
+        "hostname": "chatgpt.com",
+        "dns_records": 4,
+        "https_status": 403,
+        "elapsed_ms": 99.524,
+        "interpretation": "The unauthenticated probe reached the remote HTTP server; formal Codex calls separately mount read-only authentication."
+      },
+      "raw_artifact_audit": {
+        "result_files": 24,
+        "final_files": 24,
+        "event_files": 24,
+        "stderr_files": 24,
+        "memory_context_files": 24,
+        "failed_statuses": 0,
+        "incomplete_pairs": 0,
+        "memory_off_context_leaks": 0,
+        "model_protocol_mismatches": 0,
+        "response_schema_mismatches": 0,
+        "host_or_suite_path_leaks": 0
+      }
+    },
+    "excluded_runs": [
+      {
+        "protocol_version": 3,
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "max",
+        "completed_calls": 21,
+        "planned_calls": 24,
+        "eligible_for_effect_claims": false,
+        "primary_reason": "Memory-off agents could invoke the host memoryctl and read sibling evaluation stores, so treatment isolation failed.",
+        "secondary_reason": "Call 22 hit the account usage limit before producing an answer.",
+        "raw_artifact": ".cache/evaluation/codex-memory-ab-v2-sol-max",
+        "exclusion_marker": ".cache/evaluation/codex-memory-ab-v2-sol-max/exclusion.json"
+      }
+    ],
+    "excluded_protocol4_transport_attempts": {
+      "eligible_for_effect_claims": false,
+      "attempts": 3,
+      "artifact": ".cache/evaluation/codex-memory-ab-v2-sol-max-protocol4/transport-attempts-20260820.json",
+      "root_cause": "The Bubblewrap allowlist mounted /etc/resolv.conf but not its symlink target under /run/systemd/resolve, and it omitted the matching codex-code-mode-host.",
+      "correction": "Mount only the resolver target and adjacent code-mode host read-only, preserve timeout traces, verify with regression tests and an isolated transport probe, then rerun before continuing."
+    },
+    "external_blocker": null
+  },
+  "environment": {
+    "platform": "Linux-6.19.8-surface-3-x86_64-with-glibc2.35",
+    "python": "3.10.12",
+    "sqlite": "3.37.2"
+  }
+}

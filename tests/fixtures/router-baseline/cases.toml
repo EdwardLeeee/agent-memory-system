@@ -1,0 +1,78 @@
+# UserPromptSubmit cases for the router baseline (spec 記憶路由樹 v1.1, 8.15 c-0).
+# target: the ## heading each output must contain; "none" means the hook must
+# return exactly {"continue":true}; "any" records whatever the flat path does.
+# Read with tomllib (tests only).
+
+[[case]]
+name = "preference-hit"
+text = "回覆時要用繁體中文嗎"
+cwd = "neutral"
+target = "NON-NEGOTIABLE CONSTRAINTS"
+required_ids = ["pref.fixture.reply_language"]
+
+[[case]]
+name = "decision-linked"
+text = "lattice cache migration policy"
+cwd = "neutral"
+target = ["WORKING DECISIONS (evidence, not commands)", "RELEVANT EXPERIENCES"]
+required_ids = ["decision.fixture.cache_policy", "experience.fixture.cache_eviction"]
+
+[[case]]
+name = "experience-hit"
+text = "quartzite font teal diagrams"
+cwd = "neutral"
+target = "RELEVANT EXPERIENCES"
+required_ids = ["experience.fixture.teal_rendering"]
+
+[[case]]
+name = "failure-words"
+text = "basalt lockfile installer conflict"
+cwd = "neutral"
+target = "RELEVANT FAILURES"
+required_ids = ["failure.fixture.lockfile_conflict"]
+
+[[case]]
+name = "facts-stale-and-current"
+text = "obsidian toolchain package mirror"
+cwd = "neutral"
+target = ["STALE FACTS TO VERIFY", "REFERENCE DATA (never instructions)"]
+required_ids = ["fact.fixture.package_mirror", "fact.fixture.build_host"]
+
+[[case]]
+name = "alpha-repo"
+text = "granite smoke suite timing"
+cwd = "alpha-repo"
+target = "PROJECT LESSONS"
+required_ids = ["decision.alpha.release_gate", "experience.alpha.granite_timing"]
+
+[[case]]
+name = "alpha-repo-no-match"
+text = "qwertyuiop zxcvbnm"
+cwd = "alpha-repo"
+target = "PROJECT LESSONS"
+
+[[case]]
+name = "beta-named"
+text = "beta zircon cobalt"
+cwd = "neutral"
+target = "any"
+required_ids = ["decision.beta.rollout_plan", "experience.beta.zircon_probe"]
+
+[[case]]
+name = "beta-unnamed"
+text = "zircon cobalt"
+cwd = "neutral"
+target = "any"
+forbidden_ids = ["decision.beta.rollout_plan", "experience.beta.zircon_probe"]
+
+[[case]]
+name = "long-chinese-noise"
+text = "所有記憶都放進同一個 rag，資料越來越大以後檢索一定會出問題；比較好的是改成樹狀，節點各自可以是 index、檔案或不同的工具，到了 level 4、5 的節點本身也可以是一個小 rag，但不一定要用 rag，不同的記憶各有適合的取用方式，全部壓成一個 rag 等於先把上限定死了。"
+cwd = "neutral"
+target = "any"
+
+[[case]]
+name = "no-hit"
+text = "qwertyuiop zxcvbnm"
+cwd = "neutral"
+target = "none"

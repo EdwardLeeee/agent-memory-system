@@ -1,0 +1,25 @@
+{
+  "id": "decision.demo.cache_batching",
+  "scope": "global",
+  "source": "locally-verified",
+  "priority": "high",
+  "tags": ["demo", "cache", "batching"],
+  "problem": "Choose whether the demonstration cache should batch writes.",
+  "decision": "Treat batches of 20 writes as the current working choice.",
+  "rationale": "The initial local measurement showed lower fixed overhead at that size.",
+  "constraints": [
+    "Do not call the choice universally optimal.",
+    "Re-check it when the workload or storage medium changes."
+  ],
+  "alternatives_rejected": [
+    "One write per transaction had higher fixed overhead in the initial fixture."
+  ],
+  "consequences": [
+    "Small writes may wait briefly for a batch.",
+    "Later outcomes must be linked instead of silently changing the decision."
+  ],
+  "revisit_when": [
+    "A measured outcome contradicts or narrows the 20-write choice."
+  ],
+  "evidence": "A deterministic demonstration fixture; not a production benchmark."
+}

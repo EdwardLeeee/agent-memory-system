@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+
+# The program can live anywhere; the store is AGENT_MEMORY_HOME, else
+# ~/agent-memory (agent_memory.storage.memory_home), never this directory.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+# PreToolUse runs before every shell command: hand it to the lightweight
+# entry point, which imports only the standard library and storage, and never
+# let a failure here block a command (spec 記憶路由樹 v1.1, 8.9).
+if sys.argv[1:3] == ["hook", "pre-tool-use"]:
+    try:
+        from agent_memory.pretool import main as pretool_main
+    except Exception:
+        print('{"continue":true}')
+        raise SystemExit(0)
+    raise SystemExit(pretool_main(sys.argv[3:]))
+
+from agent_memory.cli import main  # noqa: E402
+
+
+raise SystemExit(main())
