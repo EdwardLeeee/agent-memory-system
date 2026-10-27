@@ -195,6 +195,29 @@ machine mapping、health 與 mechanical marker 預設在 `~/.config/agent-memory
 4. 明確區分「記憶裡的歷史狀態」和「這一回合剛驗證的現況」。
 5. 若有可重用的新 outcome，才記 experience 或 supersede；不因為回合結束而維護記憶。
 
+### 每週評分：`memoryctl rate`
+
+`memoryctl rate` 從最近 7 天的對話裡抽 12 則你親手送出的訊息：10 則有注入記憶，2 則沒有。一次一題。每題先印出：訊息前 300 字，以及每筆記憶的 id 和一行摘要。
+
+有注入的題目，提示行是：
+
+```text
+1 有用　2 沒用　3 礙事　s 略過｜d 記憶全文　r AI 回答　m 完整訊息 >
+```
+
+沒注入的題目是 `1 沒差　2 它應該記得某件事　s 略過｜r AI 回答　m 完整訊息 >`。
+
+`d`、`r`、`m` 只是多看一點，**不算作答**。看完回到同一題，可以重複按，大小寫都可以：
+
+- `d`：每筆記憶的全文，照種類印主要段落（failure 是 Symptom、Root Cause、Verified Fix、Retry When）。
+  - 專案文件的條目印來源、路徑、標題和內文開頭。
+  - 那句話之後被更正過的記憶會註明，已不存在的會寫明。
+  - 一次最多 3000 字，其餘的提示用 `memoryctl search --id <id>` 看。
+- `r`：AI 當時回答的前 800 字（只有文字，不含工具呼叫），以及每筆記憶的三種狀態：「寫了 依據 <id>」（回答文字裡寫了）、「有提到或查過這筆」（id 只出現在這一輪的工具呼叫等其他內容）、「沒提到」。
+- `m`：這句話的全文（最多 2000 字）。
+
+每答一題就存一次。中途按 Ctrl+C 或結束輸入，已答的題目都會保留，下次不會再問。存下的只有評分本身和 80 字摘錄，`d`、`r`、`m` 看過的內容與 AI 的回答一律不存。`memoryctl rate --summary` 看本週與前四週的有用率、礙事率。
+
 ## 查閱目前記憶
 
 ### 查一個主題
@@ -435,10 +458,10 @@ archive、event 或 Git history。
 只使用必要的正向傳輸，不把 maintenance pressure 放進 model context。參考
 [OpenAI Codex Hooks](https://learn.chatgpt.com/docs/hooks)。
 
-SessionStart 採內容驅動的 adaptive budget：沒有軟目標，只有內部最終安全上限 2800
-與各區塊自己的上限（例如 PROJECT LESSONS ≤400），Codex `additionalContextLimit` 設為 3000。依
+SessionStart 採內容驅動的 adaptive budget：沒有軟目標，只有內部最終安全上限（Codex 3400，Claude Code 5000）
+與各區塊自己的上限（例如 PROJECT LESSONS ≤400），Codex `additionalContextLimit` 設為 3600。依
 [官方 hook config 實作](https://github.com/openai/codex/blob/main/codex-rs/config/src/hook_config.rs)，這是把較大
-`additionalContext` 落盤的 approximate-token spill threshold，不是截斷上限；內部 2800
+`additionalContext` 落盤的 approximate-token spill threshold，不是截斷上限；內部 3400
 因此仍是本系統真正的內容邊界。若異常超限，先移除其他 session 摘要，再以完整 preference
 為單位保留 priority prefix；不把 preference 截成可能改變意思的半句，也不讓較低優先項目
 越過已被省略的較高優先項目，更不優先犧牲當前 task capsule。

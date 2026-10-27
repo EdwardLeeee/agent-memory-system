@@ -42,6 +42,14 @@ kind = "markdown-note"
 glob = "docs/notes/*.md"
 reference_headings = ["Constants", "For the reviewer"]
 
+# Briefs that age: an entry's score in the routed pack halves every
+# half_life_days since its file was last committed on what the source reads
+# (markdown-note and adr parsers; a whole number of days).
+[[parser]]
+kind = "markdown-note"
+glob = "docs/briefs/*.md"
+half_life_days = 14
+
 # Settlement files: JSON reports that grade earlier predictions. Every field
 # name is the project's own; nothing is assumed. Findings recurring in two or
 # more reports become generalization candidates.

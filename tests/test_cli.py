@@ -2776,7 +2776,7 @@ def content_hash(record_id):
         ]
         self.assertEqual("ok", health["status"])
         self.assertEqual("context-trimmed", health["code"])
-        self.assertLessEqual(health["estimated_tokens"], 2800)
+        self.assertLessEqual(health["estimated_tokens"], 3400)
         # Only critical and high preferences load at startup: 8 of the 12.
         self.assertEqual(8, health["preferences_total"])
         self.assertLess(health["preferences_included"], health["preferences_total"])
@@ -4245,7 +4245,7 @@ def content_hash(record_id):
             ]
             self.assertEqual(1, len(handlers), msg=event)
         pre_tool = settings["hooks"]["PreToolUse"][-1]
-        self.assertEqual("Bash", pre_tool["matcher"])
+        self.assertEqual("Bash|SendMessage|AskUserQuestion", pre_tool["matcher"])  # what is sent too (F13)
         self.assertEqual(5, pre_tool["hooks"][0]["timeout"])
         self.assertTrue(pre_tool["hooks"][0]["command"].endswith("memoryctl hook pre-tool-use --agent claude"))
 
@@ -4363,7 +4363,7 @@ def content_hash(record_id):
         ]
         self.assertEqual([], stop_handlers)
         self.assertEqual(
-            3000,
+            3600,
             hooks["hooks"]["SessionStart"][0]["hooks"][0]["additionalContextLimit"],
         )
 
@@ -4576,12 +4576,26 @@ class AgentBudgetAndPreferenceTierTests(unittest.TestCase):
         codex_context, codex = self._session_start("--agent", "codex")
         default_context, default = self._session_start()
         claude_context, claude = self._session_start("--agent", "claude")
-        self.assertLessEqual(codex["estimated_tokens"], 2800)
+        self.assertLessEqual(codex["estimated_tokens"], 3400)
         self.assertTrue(codex["trimmed"])
         self.assertEqual(codex["estimated_tokens"], default["estimated_tokens"])
-        self.assertGreater(claude["estimated_tokens"], 2800)
+        self.assertGreater(claude["estimated_tokens"], 3400)
         self.assertLessEqual(claude["estimated_tokens"], 5000)
         self.assertGreater(claude["preferences_included"], codex["preferences_included"])
+
+    def test_a_codex_start_pack_keeps_everything_up_to_3400(self) -> None:
+        # The user raised Codex's start budget from 2800 to 3400 on
+        # 2026-10-21; Claude Code's stays 5000.
+        for index in range(5):
+            self._preference(index, "high", f"High preference {index:02d} " + "彈" * 560)
+        codex_context, codex = self._session_start("--agent", "codex")
+        claude_context, claude = self._session_start("--agent", "claude")
+        self.assertGreater(codex["estimated_tokens"], 2800)
+        self.assertLessEqual(codex["estimated_tokens"], 3400)
+        self.assertFalse(codex["trimmed"])
+        self.assertEqual(5, codex["preferences_included"])
+        self.assertEqual(claude_context, codex_context)
+        self.assertEqual(claude["estimated_tokens"], codex["estimated_tokens"])
 
     def test_a_project_preference_loads_at_start_only_inside_its_project(self) -> None:
         self.run_cli(
@@ -4952,7 +4966,7 @@ class LessonAndFederationHookTests(unittest.TestCase):
         context = json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("PROJECT LESSONS", context)
         self.assertIn("guidance midpoint", context)
-        self.assertLessEqual(len(context) // 3, 2800)
+        self.assertLessEqual(len(context) // 3, 3400)
 
     def test_session_start_does_not_inject_project_lessons_outside_the_repo(
         self,

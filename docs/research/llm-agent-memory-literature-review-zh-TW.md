@@ -540,7 +540,7 @@ decay／archive／consolidation policy。
 
 # 11. `project-c` compact 成功案例：有價值，但要正確解讀
 
-使用者回饋：昨天 `project-c` 專案在 compact 後，新的上下文成功找回專案架構與當前工作，體感非常好。
+使用者回饋：`project-c` 專案壓縮之後，新的上下文能找回專案架構與當前工作。
 本次已將它記成一筆帶 applicability 的本機 experience，而不是直接把它升格為永久設計定律。
 
 從 rollout 與本機狀態可確認的鏈條是：

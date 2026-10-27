@@ -138,13 +138,22 @@ class PreToolUseTests(unittest.TestCase):
 
     # --- 4.2.4 ---------------------------------------------------------------
 
+    def test_a_claude_injection_stays_under_what_claude_code_delivers_whole(self) -> None:
+        # Claude Code saves a longer hook context to a file (F1/F2 review A).
+        with mock.patch.object(pretool, "CLAUDE_HOOK_CHAR_LIMIT", 120, create=True):
+            capped = self.decide("git reset --soft origin/main")
+        self.assertEqual("", context_of(capped))
+        self.assertIn("### failure.git.reset_soft_onto_moved_base_fixture", context_of(self.decide("git reset --soft origin/main")))
+
     def test_a_failure_whose_phrase_matches_is_injected_once_per_session(self) -> None:
         session = self.session()
         output = self.decide("git reset --soft origin/main", session)
         context = context_of(output)
         self.assertEqual("PreToolUse", output["hookSpecificOutput"]["hookEventName"])
         self.assertNotIn("permissionDecision", output["hookSpecificOutput"])
-        self.assertTrue(context.startswith("## FOR THIS COMMAND\n" + core.CITATION_REQUEST))
+        # Whether the agent used it is judged from what it wrote, not asked for (F12).
+        self.assertTrue(context.startswith("## FOR THIS COMMAND\n\n### "))
+        self.assertNotIn(core.CITATION_REQUEST, context)
         self.assertIn("### failure.git.reset_soft_onto_moved_base_fixture\n- kind: failure\n- value: ", context)
         self.assertIn("- symptom: ", context)
         self.assertIn("- retry_when: ", context)

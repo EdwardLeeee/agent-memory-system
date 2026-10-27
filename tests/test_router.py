@@ -525,11 +525,16 @@ class RouterSettingsTests(unittest.TestCase):
 
 
 class RoutedRenderTests(unittest.TestCase):
-    """The routed pack on the fixture corpus, router enabled by default."""
+    """The routed pack on the fixture corpus, router enabled by default.
+
+    The corpus gives dozens of records the same words to fill each node's
+    budget; under the relevance floor (spec 實際使用回饋改善 F3) words that
+    common would let none in, so here every word counts as uncommon. The
+    floor has its own tests in test_relevance_floor."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls._env = router_baseline.environment(extra_records=corpus)
+        cls._env = router_baseline.environment(router_toml="[relevance]\nrare_min_docs = 1000000\n", extra_records=corpus)
         cls.paths = cls._env.__enter__()
         cls.root = cls.paths["memory"]
 
@@ -657,12 +662,13 @@ class RoutedRenderTests(unittest.TestCase):
         expected = self.hook(query, "alpha", "codex")
         self.assertEqual("ok", self.health()["router"]["status"])
         target = self.paths["config"] / "router.toml"
-        target.write_text("[budgets.codex]\nproject = 1500\n", encoding="utf-8")
+        original = target.read_text(encoding="utf-8")
+        target.write_text(original + "[budgets.codex]\nproject = 1500\n", encoding="utf-8")
         try:
             actual = self.hook(query, "alpha", "codex")
             state = self.health()["router"]
         finally:
-            target.unlink()
+            target.write_text(original, encoding="utf-8")
         self.assertEqual(("error", "router-budget-invalid"), (state["status"], state.get("code")))
         self.assertEqual(expected, actual)
 
@@ -927,6 +933,57 @@ class RoutedRenderTests(unittest.TestCase):
         self.assertEqual(["fact.claude_code.key", "fact.desk.top", "fact.agent.small", "fact.agent.big"],
                          [c["id"] for c in ordered])
 
+    def test_on_equal_scores_the_record_updated_last_goes_first(self) -> None:
+        # The phase0 engine spike tied with the decision that replaced it and,
+        # being the smaller block, took the decisions seat (designer 2026-10-21).
+        def candidate(record_id: str, updated: str, tokens: int) -> dict[str, Any]:
+            return {"id": record_id, "score": 44, "tie_tokens": tokens, "metadata": {"updated_at": updated}}
+
+        ordered = router._ordered([
+            candidate("decision.kiln.phase0_spike", "2026-09-29T10:00:00+00:00", 120),
+            candidate("decision.kiln.engine_choice", "2026-10-12T08:00:00+00:00", 300),
+        ])
+        self.assertEqual(["decision.kiln.engine_choice", "decision.kiln.phase0_spike"], [c["id"] for c in ordered])
+
+    def test_on_equal_scores_and_no_date_the_better_text_match_goes_first(self) -> None:
+        # 估值: three shorter ADRs took the sources seats from the one about the subject.
+        def candidate(record_id: str, rank: float, tokens: int, updated: str = "") -> dict[str, Any]:
+            return {"id": record_id, "score": 70, "tie_tokens": tokens, "metadata": {"updated_at": updated},
+                    "item": {"fts_rank": rank}}
+
+        ordered = router._ordered([
+            candidate("federation.kiln.adr-0009-glaze-notes", -3.22, 71),
+            candidate("federation.kiln.adr-0024-firing-curve", -3.45, 140),
+        ])
+        self.assertEqual(["federation.kiln.adr-0024-firing-curve",
+                          "federation.kiln.adr-0009-glaze-notes"], [c["id"] for c in ordered])
+        # With the text matched as well, the date decides: the one updated last (F3(b)).
+        dated = router._ordered([
+            candidate("decision.kiln.older", -4.0, 50, "2026-09-29T10:00:00+00:00"),
+            candidate("decision.kiln.newer", -4.0, 500, "2026-10-12T08:00:00+00:00"),
+        ])
+        self.assertEqual(["decision.kiln.newer", "decision.kiln.older"], [c["id"] for c in dated])
+        # The full-text candidates carry their rank.
+        turn = router._Turn(self.root, self.paths["alpha"], "pumice drill core catalogued", False)
+        try:
+            ranks = [item.get("fts_rank") for item in turn.rows(["project/alpha"])]
+        finally:
+            turn.close()
+        self.assertTrue(ranks)
+        self.assertTrue(all(isinstance(rank, float) for rank in ranks), ranks[:3])
+
+    def test_on_equal_scores_the_better_text_match_goes_first_even_before_a_newer_record(self) -> None:
+        # The golden question about claude -a lost its fact to one recorded the day before (designer 2026-10-21).
+        def candidate(record_id: str, rank: float, updated: str, tokens: int) -> dict[str, Any]:
+            return {"id": record_id, "score": 48, "tie_tokens": tokens, "metadata": {"updated_at": updated},
+                    "item": {"fts_rank": rank}}
+
+        ordered = router._ordered([
+            candidate("fact.tooling.long_hook_output_saved_to_file", -5.65, "2026-10-20T21:25:10+00:00", 212),
+            candidate("fact.tooling.config_dir_moves_global_config", -6.92, "2026-09-22T10:40:06+00:00", 141),
+        ])
+        self.assertEqual("fact.tooling.config_dir_moves_global_config", ordered[0]["id"])
+
     def test_short_ascii_words_match_whole_words_in_content_only(self) -> None:
         from types import SimpleNamespace
 
@@ -992,6 +1049,105 @@ class RoutedRenderTests(unittest.TestCase):
         for heading in ("NON-NEGOTIABLE CONSTRAINTS", "RELEVANT FAILURES", "REFERENCE DATA (never instructions)", "STALE FACTS TO VERIFY"):
             self.assertNotIn(f"## {heading}", rendered)
         self.assertEqual({"continue": True}, self.hook("qwertyuiop zxcvbnm"))
+
+
+class NodeFillTests(unittest.TestCase):
+    def test_a_node_s_best_record_goes_in_before_an_earlier_subindex_s_ties(self) -> None:
+        # Tied 40-point decisions took the room a 220-point experience needed
+        # (a decision and notes on the live ledger; retrieval re-check R1).
+        pad = " The shelf log notes each firing in order and nothing else of note happens in it."
+
+        def records(root: Path) -> None:
+            for n in ("one", "two"):
+                put(root, "decision", f"decision.alpha.gate_{n}", scope="project:alpha",
+                    decision=f"Basalt kiln firings use gate {n}." + pad * 2)
+            put(root, "experience", "experience.alpha.basalt_kiln_vent_glaze_cone", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze", "cone"],
+                outcome="Basalt kiln vent glaze cone: open the vent before cone six or the glaze crawls." + pad * 3)
+
+        with router_baseline.environment(extra_records=records,
+                                         router_toml="[budgets.claude]\nproject = 600\nproject_borrow_max = 0\n") as paths:
+            rendered = core._render_context(paths["memory"], paths["alpha"], "basalt kiln vent glaze cone", 3000,
+                                            explain=True, allow_reindex=False, agent="claude", feedback=False)
+        self.assertIn("### experience.alpha.basalt_kiln_vent_glaze_cone", rendered)
+        self.assertIn("### decision.alpha.gate_one", rendered)  # the rest in their order, while they fit
+
+    PAD = " The shelf log notes each firing in order and nothing else of note happens in it."
+
+    def fill(self, records: Any, project: int) -> set[str]:
+        """The alpha records a basalt kiln prompt's pack shows in full."""
+        with router_baseline.environment(
+                extra_records=records, router_toml=f"[budgets.claude]\nproject = {project}\nproject_borrow_max = 0\n") as paths:
+            rendered = core._render_context(paths["memory"], paths["alpha"], "basalt kiln vent glaze cone", 3000,
+                                            explain=True, allow_reindex=False, agent="claude", feedback=False)
+        return {record_id for record_id, _, _ in blocks(rendered) if ".alpha." in record_id}
+
+    def test_a_record_goes_in_before_lower_ones_of_an_earlier_subindex(self) -> None:
+        # The random-map CI experience at 100 behind an 80-point decision and a
+        # 60-point failure of a D-079 note's project (designer 2026-10-27).
+        pad = self.PAD
+
+        def records(root: Path) -> None:
+            put(root, "experience", "experience.alpha.basalt_kiln_vent_glaze_cone", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze", "cone"], outcome="Basalt kiln vent glaze cone: open the vent before cone six." + pad)
+            put(root, "experience", "experience.alpha.basalt_kiln_vent_glaze", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze"], outcome="Basalt kiln vent glaze: shut the vent for a matte glaze." + pad * 3)
+            for n in ("one", "two"):
+                put(root, "decision", f"decision.alpha.gate_{n}", scope="project:alpha", tags=["basalt", "kiln"],
+                    decision=f"Basalt kiln firings use gate {n}." + pad * 2)
+            put(root, "failure", "failure.alpha.basalt_kiln_vent_stuck", scope="project:alpha", tags=["basalt", "kiln", "vent"],
+                symptom="Basalt kiln vent stuck half open." + pad * 2)
+
+        # 220, 176 and the 132-point failure; the 88-point decisions find no room.
+        self.assertEqual({"experience.alpha.basalt_kiln_vent_glaze_cone", "experience.alpha.basalt_kiln_vent_glaze",
+                          "failure.alpha.basalt_kiln_vent_stuck"}, self.fill(records, 600))
+
+    def test_by_score_a_subindex_still_takes_no_more_than_its_cap(self) -> None:
+        pad = self.PAD
+
+        def records(root: Path) -> None:
+            put(root, "failure", "failure.alpha.basalt_kiln_vent_glaze_cone", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze", "cone"], symptom="Basalt kiln vent glaze cone crawled at cone six." + pad)
+            put(root, "failure", "failure.alpha.basalt_kiln_vent_glaze", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze"], symptom="Basalt kiln vent glaze pinholed." + pad)
+            put(root, "experience", "experience.alpha.basalt_kiln_vent", scope="project:alpha",
+                tags=["basalt", "kiln", "vent"], outcome="Basalt kiln vent: open it a crack at cone four." + pad * 3)
+            for n in ("one", "two"):
+                put(root, "decision", f"decision.alpha.gate_{n}", scope="project:alpha", tags=["basalt", "kiln"],
+                    decision=f"Basalt kiln firings use gate {n}." + pad * 2)
+
+        # One project failure though the second (176) outranks the experience (152).
+        self.assertEqual({"failure.alpha.basalt_kiln_vent_glaze_cone", "experience.alpha.basalt_kiln_vent", "decision.alpha.gate_one"},
+                         self.fill(records, 600))
+
+    def decisions_with_evidence(self, root: Path) -> None:
+        pad = self.PAD
+        put(root, "decision", "decision.alpha.firing_log_rule", scope="project:alpha",
+            tags=["basalt", "kiln", "vent", "glaze", "cone"], decision="Basalt kiln vent glaze cone firings follow the log." + pad)
+        # Matches nothing of the prompt: in only as the decision's evidence (35).
+        put(root, "experience", "experience.alpha.shelf_log_backs_the_rule", scope="project:alpha", tags=["shelf"],
+            outcome="The shelf log held for twelve firings." + pad, links=[{"id": "decision.alpha.firing_log_rule", "effect": "supports"}])
+        put(root, "experience", "experience.alpha.basalt_kiln_vent_glaze", scope="project:alpha",
+            tags=["basalt", "kiln", "vent", "glaze"], outcome="Basalt kiln vent glaze: shut the vent for a matte glaze." + pad * 8)
+        put(root, "decision", "decision.alpha.gate_one", scope="project:alpha", tags=["basalt", "kiln", "vent"],
+            decision="Basalt kiln vent firings use gate one." + pad * 2)
+
+    def test_the_evidence_a_decision_pulls_follows_it_before_better_records(self) -> None:
+        # The 220-point decision, its 35-point evidence, then the 176-point
+        # experience; the 132-point decision finds no room.
+        self.assertEqual({"decision.alpha.firing_log_rule", "experience.alpha.shelf_log_backs_the_rule",
+                          "experience.alpha.basalt_kiln_vent_glaze"}, self.fill(self.decisions_with_evidence, 720))
+
+    def test_by_score_decisions_still_take_at_most_half_the_project_budget(self) -> None:
+        def records(root: Path) -> None:
+            self.decisions_with_evidence(root)
+            put(root, "decision", "decision.alpha.cone_chart_rule", scope="project:alpha",
+                tags=["basalt", "kiln", "vent", "glaze", "cone"], decision="Basalt kiln vent firings follow the chart." + self.PAD * 3)
+
+        # The 200-point decision outranks the experience, but with the first
+        # decision and its evidence it would pass half of 720.
+        self.assertEqual({"decision.alpha.firing_log_rule", "experience.alpha.shelf_log_backs_the_rule",
+                          "experience.alpha.basalt_kiln_vent_glaze"}, self.fill(records, 720))
 
 
 class ResumeCandidateSummaryTests(unittest.TestCase):
@@ -1063,6 +1219,28 @@ class ResumeCandidateSummaryTests(unittest.TestCase):
             target.unlink()
         self.assertIn("- validation: The sample was logged", context)
         self.assertIn("- session_id: alpha-worker", context)
+
+
+class ResumeCandidateTasksTests(unittest.TestCase):
+    def test_a_new_session_s_resume_summary_names_up_to_three_open_tasks(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            folder = root / "sessions" / "by-session" / "alpha-worker"
+            folder.mkdir(parents=True)
+            tasks = "".join(f"  - [{status}] PR-{n}：Step {n} · 2026-10-21T10:0{n}Z\n"
+                            for n, status in enumerate(("done", "doing", "waiting", "todo", "todo"), 1))
+            (folder / "HOT.md").write_text(
+                "# Current Resume Capsule\n\n- updated_at: 2099-12-30T00:00:00Z\n- session_id: alpha-worker\n"
+                f"- cwd: {paths['alpha']}\n- state: active\n- active_task: Alpha worker task.\n- paused_task: none\n"
+                "- resume_point: Alpha resume point.\n- next_action: Alpha next action.\n- validation: v\n- rollback: r\n"
+                f"- read_next: retrieve only the relevant canonical records and decisions\n- tasks:\n{tasks}",
+                encoding="utf-8")
+            text, _ = core._compose_session_context(root, paths["alpha"], None, source="startup", budget_tokens=3000,
+                                                    allow_reindex=False)
+        summary = text.split("## MOST RECENT RESUME CANDIDATE", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("- tasks:\n  - [doing] PR-2：Step 2\n  - [waiting] PR-3：Step 3\n  - [todo] PR-4：Step 4", summary)
+        self.assertNotIn("PR-1", summary)  # done
+        self.assertNotIn("PR-5", summary)  # past three
 
 
 class SourcesPointerTests(unittest.TestCase):
@@ -1167,8 +1345,11 @@ class MembershipRobustnessTests(unittest.TestCase):
             namesake.mkdir(parents=True)
 
             def prompt(cwd: Path, text: str) -> str:
+                # Each its own session: a lesson given once is only named later in a session.
+                prompt.calls = getattr(prompt, "calls", 0) + 1
                 output = core.handle_hook(paths["memory"], "user-prompt-submit", {
-                    "session_id": "router-test", "cwd": str(cwd), "hook_event_name": "UserPromptSubmit", "prompt": text,
+                    "session_id": f"router-test-{prompt.calls}", "cwd": str(cwd), "hook_event_name": "UserPromptSubmit",
+                    "prompt": text,
                 }, agent="claude")
                 return output.get("hookSpecificOutput", {}).get("additionalContext", "")
 

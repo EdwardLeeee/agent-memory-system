@@ -15,7 +15,7 @@ disappears. No file in the source repo is ever written by this module.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -61,7 +61,10 @@ PARSER_OPTION_KEYS: dict[str, dict[str, type]] = {
     "settlement": SETTLEMENT_OPTION_KEYS,
     # heading_level "3" splits a note at ### headings: a decision log whose
     # ## headings are dates and whose ### headings are the decisions.
-    "markdown-note": {"reference_headings": list, "heading_level": str},
+    # half_life_days: an entry's score in the routed pack halves for every so
+    # many days since its file was last committed (spec 實際使用回饋改善 F7).
+    "markdown-note": {"reference_headings": list, "heading_level": str, "half_life_days": int},
+    "adr": {"half_life_days": int},
 }
 MARKDOWN_HEADING_LEVELS = ("2", "3")
 
@@ -83,6 +86,8 @@ def _parse_toml_scalar(raw: str, *, line_no: int) -> Any:
     raw = raw.strip()
     if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
         return raw[1:-1]
+    if re.fullmatch(r"\d+", raw):
+        return int(raw)
     if raw.startswith("[") and raw.endswith("]"):
         inner = raw[1:-1].strip()
         if not inner:
@@ -99,7 +104,7 @@ def _parse_toml_scalar(raw: str, *, line_no: int) -> Any:
             items.append(part[1:-1])
         return items
     raise FederationConfigError(
-        f"line {line_no}: only quoted strings and string lists are supported"
+        f"line {line_no}: only quoted strings, string lists and whole numbers are supported"
     )
 
 
@@ -107,8 +112,8 @@ def parse_minimal_toml(text: str) -> dict[str, Any]:
     """Parse the narrow TOML subset a source config needs.
 
     Supports `[section]` tables, `[[array.of.tables]]` (each becomes one dict
-    appended to a list), `key = "string"`, `key = ["a", "b"]`, and `#`
-    comments. Nothing else.
+    appended to a list), `key = "string"`, `key = ["a", "b"]`, `key = 14`,
+    and `#` comments. Nothing else.
     """
     root: dict[str, Any] = {}
     current: dict[str, Any] = root
@@ -224,6 +229,8 @@ def load_source_config(config_root: Path, name: str) -> dict[str, Any]:
                 raise FederationConfigError(f"{path}: heading_level must be \"2\" or \"3\"")
             if expected is str and not isinstance(value, str):
                 raise FederationConfigError(f"{path}: {key} must be a string")
+            if expected is int and not (isinstance(value, int) and value > 0):
+                raise FederationConfigError(f"{path}: {key} must be a whole number of days above 0")
     return {
         "name": name,
         "repo": Path(repo).expanduser().resolve(),
@@ -1213,6 +1220,129 @@ def parse_git_log(
     return entries
 
 
+def last_commits(tree: "SourceTree", pattern: str) -> dict[str, str]:
+    """When each file `pattern` matches was last committed in what the source
+    reads (the ref's commit, else HEAD), as ISO time; a file never committed
+    is absent. One git log over the pattern's folder."""
+    if not tree.commit:
+        return {}
+    folder = pattern.split("*", 1)[0].rpartition("/")[0]
+    # Names as they are: quoted, a Chinese file name never matched its glob
+    # (retrieval review: such briefs never decayed).
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=off", "-C", str(tree.repo), "log", "--format=%x00%cI", "--name-only", tree.commit, "--",
+         *([folder] if folder else [])],
+        env=git_environment(), capture_output=True, text=True, check=False,
+    )
+    times: dict[str, str] = {}
+    current = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("\0"):
+            current = line[1:]
+        elif line and current and line not in times and _glob_match(line, pattern):
+            times[line] = current
+    return times
+
+
+def first_commits(tree: "SourceTree", pattern: str) -> dict[str, str]:
+    """When each file `pattern` matches was first added in what the source
+    reads, as ISO time: the day a project decision record appeared (F8). A
+    file renamed since counts from when it was added under its first name."""
+    if not tree.commit:
+        return {}
+    folder = pattern.split("*", 1)[0].rpartition("/")[0]
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=off", "-C", str(tree.repo), "log", "--diff-filter=AR", "--format=%x00%cI",
+         "--name-status", tree.commit, "--", *([folder] if folder else [])],
+        env=git_environment(), capture_output=True, text=True, check=False,
+    )
+    added: dict[str, str] = {}
+    renamed: dict[str, tuple[str, str]] = {}  # the new name -> (the old one, when)
+    current = ""
+    for line in result.stdout.splitlines():  # newest first: the oldest add is written last
+        if line.startswith("\0"):
+            current = line[1:]
+            continue
+        parts = line.split("\t")
+        if not current:
+            continue
+        if parts[0] == "A" and len(parts) == 2:
+            added[parts[1]] = current
+        elif parts[0].startswith("R") and len(parts) == 3:
+            renamed.setdefault(parts[2], (parts[1], current))
+    times: dict[str, str] = {}
+    for name in {*added, *renamed}:
+        if not _glob_match(name, pattern):
+            continue
+        first, seen = name, {name}
+        while first in renamed and renamed[first][0] not in seen:
+            first = renamed[first][0]
+            seen.add(first)
+        when = added.get(first) or added.get(name) or (renamed[name][1] if name in renamed else "")
+        if when:
+            times[name] = when
+    return times
+
+
+_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _blame_times(tree: "SourceTree", relative_path: str) -> dict[int, str]:
+    """Line number -> when the commit that last wrote the line was made, as
+    ISO time with its zone; one git blame for the file, of what the source
+    reads (the ref's commit, else the working tree, so the lines match)."""
+    if not tree.commit:
+        return {}
+    result = subprocess.run(
+        ["git", "-C", str(tree.repo), "blame", "--porcelain", *([tree.commit] if tree.from_ref else []), "--", relative_path],
+        env=git_environment(), capture_output=True, text=True, check=False,
+    )
+    times: dict[int, str] = {}
+    commits: dict[str, dict[str, str]] = {}
+    sha, number = "", 0
+    for line in result.stdout.splitlines():
+        if line.startswith("\t"):
+            info = commits.get(sha, {})
+            if info.get("time", "").isdigit():
+                offset = info.get("tz", "+0000")
+                zone = timezone(timedelta(hours=int(offset[1:3]), minutes=int(offset[3:5])) * (-1 if offset[0] == "-" else 1))
+                times[number] = datetime.fromtimestamp(int(info["time"]), zone).isoformat()
+            continue
+        parts = line.split(" ")
+        if len(parts) >= 3 and re.fullmatch(r"[0-9a-f]{40}", parts[0]) and parts[2].isdigit():
+            sha, number = parts[0], int(parts[2])
+            commits.setdefault(sha, {})
+        elif line.startswith("committer-time "):
+            commits.setdefault(sha, {})["time"] = line.split(" ", 1)[1]
+        elif line.startswith("committer-tz "):
+            commits.setdefault(sha, {})["tz"] = line.split(" ", 1)[1]
+    return times
+
+
+def _log_days(tree: "SourceTree", relative_path: str) -> dict[str, str]:
+    """A decision log's `###` decisions, each with when it was recorded: a
+    day its own heading names, else when the commit that wrote the heading
+    line was made, else the day its `##` heading names (retrieval review 6:
+    a log with two `##` headings dated all its 95 entries 09-30 or 10-01)."""
+    try:
+        text = tree.read(relative_path)
+    except OSError:
+        return {}
+    blamed = _blame_times(tree, relative_path)
+    days: dict[str, str] = {}
+    day = ""
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith("## "):
+            found = _DAY_RE.search(line)
+            day = found.group(0) if found else ""
+        elif line.startswith("### "):
+            own = _DAY_RE.search(line)
+            when = own.group(0) if own else blamed.get(number) or day
+            if when:
+                days.setdefault(line[4:].strip(), when)
+    return days
+
+
 def collect_source_entries(config: dict[str, Any], tree: "SourceTree | None" = None) -> list[dict[str, Any]]:
     tree = tree or SourceTree(config["repo"], config.get("ref"))
     entries: list[dict[str, Any]] = []
@@ -1221,6 +1351,7 @@ def collect_source_entries(config: dict[str, Any], tree: "SourceTree | None" = N
     findings: list[dict[str, Any]] = []
     for parser in config["parsers"]:
         kind = parser["kind"]
+        before = len(entries)
         if kind == "adr":
             entries.extend(
                 parse_adr(config["name"], config["affinity"], tree, parser["glob"])
@@ -1243,6 +1374,32 @@ def collect_source_entries(config: dict[str, Any], tree: "SourceTree | None" = N
             entries.extend(
                 parse_git_log(config["name"], config["affinity"], tree, since)
             )
+        # A project's own decision records, with the day each appeared: an
+        # ADR the day its file was added, a decision log's entry the day its
+        # heading names; a ledger decision older than a similar one is
+        # marked as such in the routed pack (spec 實際使用回饋改善 F8).
+        if kind == "adr" or (kind == "markdown-note" and parser.get("heading_level") == "3"):
+            added = first_commits(tree, parser["glob"]) if kind == "adr" else {}
+            logs: dict[str, dict[str, str]] = {}
+            for entry in entries[before:]:
+                origin = entry["metadata"]["origin"]
+                path = str(origin.get("path", ""))
+                if kind == "adr":
+                    day = added.get(path, "")
+                else:
+                    if path not in logs:  # once a file, not once an entry (retrieval review 7)
+                        logs[path] = _log_days(tree, path)
+                    day = logs[path].get(str(origin.get("anchor", "")), "")
+                entry["metadata"]["decision_record"] = True
+                if day:
+                    entry["metadata"]["recorded_on"] = day
+        if parser.get("half_life_days"):
+            committed = last_commits(tree, parser["glob"])
+            for entry in entries[before:]:
+                entry["metadata"]["half_life_days"] = parser["half_life_days"]
+                when = committed.get(str(entry["metadata"]["origin"].get("path", "")))
+                if when:
+                    entry["metadata"]["source_committed_at"] = when
     if findings:
         entries.extend(
             derive_candidates(config["name"], config["affinity"], tree, findings)

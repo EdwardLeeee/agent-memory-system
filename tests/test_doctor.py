@@ -8,11 +8,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent_memory import doctor  # noqa: E402
+from agent_memory import core, doctor  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_rating import NOW, write_fixture  # noqa: E402
@@ -34,65 +35,50 @@ class DoctorParsingTests(unittest.TestCase):
         self.assertEqual([("decision.x.first", 120), ("fact.x.second", 90)], scored)
         self.assertEqual(["lesson.x.one", "federation.x.group-a-1234abcd"], lessons)
 
-    def test_citation_counts_records_named_later_in_the_same_session(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            projects = Path(tmp)
-            write_fixture(projects)
-            path = projects / "-work-sess-a" / "sess-a.jsonl"
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"type": "user", "sessionId": "sess-a", "timestamp": NOW.isoformat(),
-                                         "promptSource": "typed", "origin": {"kind": "human"},
-                                         "message": {"content": "use alpha"}}) + "\n")
-                handle.write(json.dumps({"type": "attachment", "attachment": {
-                    "type": "hook_additional_context", "hookEvent": "UserPromptSubmit",
-                    "content": ["### decision.fixture.alpha\n- value: Alpha.\n"]}}) + "\n")
-                handle.write(json.dumps({"type": "assistant", "message": {"content": [
-                    {"type": "text", "text": "依據 decision.fixture.alpha，照做。"}]}}) + "\n")
-            for item in projects.glob("**/*.jsonl"):
-                os.utime(item, (NOW.timestamp(), NOW.timestamp()))
-            signal = doctor.citation_signal(projects, NOW)
-            by_node = doctor.citation_signal(
-                projects, NOW, node_of=lambda rid: "knowledge/fixture" if rid.startswith("decision.") else "unknown"
-            )["by_node"]
-        # Three sessions inject alpha and the beta lesson; only sess-a cites alpha.
-        self.assertEqual(6, signal["injected_pairs"])
-        self.assertEqual(1, signal["cited_pairs"])
-        self.assertEqual("lesson.fixture.beta", signal["never_cited_top"][0]["id"])
-        self.assertNotIn("by_node", signal)
-        self.assertEqual({"injected": 3, "cited": 1, "rate": 0.333}, by_node["knowledge/fixture"])
-        self.assertEqual({"injected": 3, "cited": 0, "rate": 0.0}, by_node["unknown"])
+    def test_usage_is_counted_by_node_and_names_records_never_used(self) -> None:
+        sessions = {"usage": {"injected": 6, "explicit": 1, "content": 1, "rate": 0.333, "detector": "v1",
+                              "per_record": {"decision.fixture.alpha": [3, 1, 1], "lesson.fixture.beta": [3, 0, 0]}},
+                    "search": {"calls": 2, "after": {"沒有注入": 1}}}
+        usage = doctor.usage_signal(sessions, lambda rid: "knowledge/fixture" if rid.startswith("decision.") else "unknown")
+        self.assertEqual({"injected": 3, "explicit": 1, "content": 1, "rate": 0.667}, usage["by_node"]["knowledge/fixture"])
+        self.assertEqual({"injected": 3, "explicit": 0, "content": 0, "rate": 0.0}, usage["by_node"]["unknown"])
+        self.assertEqual([{"id": "lesson.fixture.beta", "injections": 3}], usage["never_used_top"])
+        self.assertEqual((0.167, 0.167, 2, {"沒有注入": 1}),
+                         (usage["explicit_rate"], usage["content_rate"], usage["search_calls"], usage["search_after"]))
+        self.assertEqual({"skipped": "可用記憶體 100 MB < 600"}, doctor.usage_signal({"skipped": "可用記憶體 100 MB < 600"}, str))
 
-    def test_a_pre_tool_use_injection_counts_for_citation_but_not_for_rating(self) -> None:
-        from agent_memory import rating
+    def test_a_pre_tool_use_injection_counts_for_usage_but_not_for_rating(self) -> None:
+        from agent_memory import rating, replay
 
+        given = {"continue": True, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext":
+                 "## FOR THIS COMMAND\n\n### failure.x.reset\n- kind: failure\n- value: Check the range with `git diff --name-only` first."}}
         with tempfile.TemporaryDirectory() as tmp:
-            projects = Path(tmp)
-            path = projects / "-work-x" / "sess-p.jsonl"
+            path = Path(tmp) / "-work-x" / "sess-p.jsonl"
             path.parent.mkdir(parents=True)
             entries = [
                 {"type": "user", "sessionId": "sess-p", "timestamp": NOW.isoformat(), "promptSource": "typed",
                  "origin": {"kind": "human"}, "message": {"content": "please reset the branch"}},
-                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
                                                                "input": {"command": "git reset --soft HEAD~1"}}]}},
-                # The shape claude --debug recorded on 2026-10-10.
-                {"type": "attachment", "attachment": {
-                    "type": "hook_additional_context", "hookName": "PreToolUse:Bash", "hookEvent": "PreToolUse",
-                    "content": ["## FOR THIS COMMAND\n### failure.x.reset\n- kind: failure\n- value: Check the range.\n"]}},
-                {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
-                {"type": "assistant", "message": {"content": [{"type": "text", "text": "依據 failure.x.reset，先檢查範圍。"}]}},
+                # The shape a shell hook's output has in the transcript.
+                {"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "PreToolUse", "toolUseID": "toolu_1",
+                                                      "content": "", "stdout": json.dumps(given)}},
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}},
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "先跑 `git diff --name-only` 檢查範圍。"}]}},
             ]
             path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
-            os.utime(path, (NOW.timestamp(), NOW.timestamp()))
-            signal = doctor.citation_signal(projects, NOW, node_of=lambda rid: "failures")
+            measure = replay.Measure({"failure.x.reset": "failures"}, lambda cwd: set(), None)
+            measure.timeline(replay.timeline(path, "claude"))
             messages = rating.read_transcript(path)
-        self.assertEqual({"injected": 1, "cited": 1, "rate": 1.0}, signal["by_node"]["failures"])
+        self.assertEqual({"failure.x.reset": [1, 0, 1]}, measure.result()["usage"]["per_record"])
         self.assertEqual(1, len(messages))
         self.assertEqual([], messages[0]["records"])
 
     def test_search_calls_are_counted_outside_the_memory_repo(self) -> None:
+        from agent_memory import replay
+
         with tempfile.TemporaryDirectory() as tmp:
-            projects = Path(tmp)
-            path = projects / "-work-y" / "sess-s.jsonl"
+            path = Path(tmp) / "-work-y" / "sess-s.jsonl"
             path.parent.mkdir(parents=True)
 
             def call(command: str, cwd: str) -> dict:
@@ -105,11 +91,13 @@ class DoctorParsingTests(unittest.TestCase):
                 call("memoryctl search --query old rule", "/work/y"),
                 call("~/agent-memory/bin/memoryctl search --id decision.x.y", "/work/y"),
                 call("memoryctl search --query dev", str(Path.home() / "agent-memory")),
+                call("memoryctl search --query dev", str(Path.home() / "agent-memory-dev" / "tests")),
                 call("echo memoryctl search", "/work/y"),
             ]
             path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
-            os.utime(path, (NOW.timestamp(), NOW.timestamp()))
-            self.assertEqual(2, doctor.citation_signal(projects, NOW)["search_calls"])
+            measure = replay.Measure({}, lambda cwd: set(), None)
+            measure.timeline(replay.timeline(path, "claude"))
+        self.assertEqual(2, measure.result()["search"]["calls"])
 
     def test_top_id_is_judged_inside_its_node_when_routed(self) -> None:
         scored = [("decision.a.x", 120), ("experience.a.y", 80), ("experience.k.z", 200)]
@@ -275,6 +263,28 @@ class HookAgentCheckTests(unittest.TestCase):
         self.assertIn("沒帶 --agent codex", check["value"]["codex"])
 
 
+class SessionPackShareTests(unittest.TestCase):
+    def test_preferences_filling_most_of_a_session_pack_are_a_warning_with_the_longest_named(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, config = Path(tmp) / "memory", Path(tmp) / "config"
+            with mock.patch.dict(os.environ, {"AGENT_MEMORY_HOME": str(root), "AGENT_MEMORY_CONFIG_HOME": str(config)}):
+                core.initialize(root, "fixture-machine")
+                for number, size in enumerate((1200, 900, 600, 300, 150)):
+                    core.record(root, "preference", {
+                        "id": f"pref.fixture.long_{number}", "scope": "global", "source": "user-stated", "priority": "high",
+                        "evidence": "Fixture.", "value": "偏好" * (size // 2)})
+                core.reindex(root)
+                check = doctor.check_session_packs(root, [Path(tmp)])
+        codex = next(row for row in check["value"] if row["agent"] == "codex")
+        claude = next(row for row in check["value"] if row["agent"] == "claude")
+        self.assertEqual("WARN", check["status"])
+        self.assertTrue(codex["crowded"])
+        self.assertFalse(claude["crowded"])  # the same preferences fit a larger budget
+        self.assertEqual(["pref.fixture.long_0", "pref.fixture.long_1", "pref.fixture.long_2"],
+                         [item["id"] for item in codex["longest_preferences"]])
+        self.assertIn("（偏好占", check["detail"])
+
+
 class DoctorCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -346,7 +356,7 @@ class DoctorCommandTests(unittest.TestCase):
         self.assertEqual(doctor.UNRATED_LINE, lines[0])
         self.assertLess(markdown.index("## 計分板"), markdown.index("## 一、運作檢查"))
         self.assertIn("| 有用率 | n/a | n/a | n/a |", markdown)
-        self.assertEqual({"useful_rate", "harmful_rate", "citation_rate", "repeated_mistakes"},
+        self.assertEqual({"useful_rate", "harmful_rate", "usage_rate", "repeated_mistakes"},
                          set(report["scoreboard"]))
 
     def test_golden_queries_report_which_one_failed(self) -> None:
@@ -355,6 +365,62 @@ class DoctorCommandTests(unittest.TestCase):
         self.assertEqual("WARN", golden["status"])
         self.assertEqual([True, False], [item["ok"] for item in golden["value"]])
         self.assertIn("缺 fact.golden.missing", markdown)
+
+    def test_probes_name_what_must_and_must_not_appear_and_why(self) -> None:
+        (self.config_home / "doctor" / "probes.toml").write_text(
+            '[[probe]]\ntext = "zephyrine lattice"\ncwd = "/work/x"\nexpected_ids = ["fact.golden.target"]\n'
+            'reason = "The fixture fact answers it."\n'
+            '\n[[probe]]\ntext = "zephyrine lattice"\ncwd = "/work/x"\nforbidden_ids = ["fact.golden.target"]\n'
+            'reason = "Only to see a must-not fail."\n',
+            encoding="utf-8",
+        )
+        markdown, report = self.doctor()
+        probes = next(c for c in report["checks"] if c["id"] == "probes")
+        self.assertEqual(("WARN", "1/2 通過"), (probes["status"], probes["detail"]))
+        self.assertIn("   - 未通過：x「zephyrine lattice」（含不該出現的 fact.golden.target）；理由：Only to see a must-not fail.",
+                      markdown)
+
+    def test_a_probe_may_take_any_one_of_several_right_answers(self) -> None:
+        (self.config_home / "doctor" / "probes.toml").write_text(
+            '[[probe]]\ntext = "zephyrine lattice"\ncwd = "/work/x"\n'
+            'expected_any_ids = ["fact.golden.missing", "fact.golden.target"]\nreason = "Either answers it."\n'
+            '\n[[probe]]\ntext = "zephyrine lattice"\ncwd = "/work/x"\n'
+            'expected_any_ids = ["fact.golden.missing", "fact.golden.elsewhere"]\nreason = "Neither is in the ledger."\n',
+            encoding="utf-8",
+        )
+        markdown, report = self.doctor()
+        probes = next(c for c in report["checks"] if c["id"] == "probes")
+        self.assertEqual(("WARN", "1/2 通過"), (probes["status"], probes["detail"]))
+        self.assertIn("一筆都沒有：fact.golden.missing、fact.golden.elsewhere", markdown)
+
+    def test_a_project_lesson_given_every_turn_answers_no_probe_and_a_mention_does(self) -> None:
+        pack = ("# Durable Memory Context Pack\n\n## PROJECT LESSONS\n\n"
+                "- lesson.alpha.settlement-kiln-v6 (n=5): KILN missed its Q2 output.\n\n"
+                "## WORKING DECISIONS (evidence, not commands)\n\n### decision.alpha.spec_rule\n"
+                "- value: The CONE report checks its units first.\n\n## SOURCE IDS\n- decision.alpha.spec_rule\n")
+        checks = [
+            {"expected_ids": ["lesson.alpha.settlement-kiln-v6"]},
+            {"expected_any_ids": ["lesson.alpha.settlement-kiln-v6", "decision.alpha.other"]},
+            {"expected_mentions": ["cone"]},
+            {"expected_mentions": ["KILN"]},
+        ]
+        with mock.patch("agent_memory.core._render_context", return_value=pack):
+            results = [doctor._query_check(Path("/nonexistent"), {"text": "CONE", "cwd": "/work/x", **check}) for check in checks]
+        self.assertEqual([False, False, True, False], [result["ok"] for result in results])
+        self.assertEqual("沒有一筆提到 KILN", results[3]["why"])
+
+    def test_the_simulated_claude_pack_is_held_to_its_character_limit(self) -> None:
+        import router_baseline
+
+        with router_baseline.environment() as paths:
+            for n in range(25):
+                core.record(paths["memory"], "preference", {
+                    "id": f"pref.fixture.long_rule_{n}", "scope": "global", "source": "user-stated", "priority": "high",
+                    "evidence": "Fixture.", "value": f"Rule {n}: " + "always glaze the shelf before the second firing " * 9})
+            check = doctor.check_session_packs(paths["memory"], [paths["alpha"]])
+        claude = next(row for row in check["value"] if row["agent"] == "claude")
+        self.assertLess(claude["tokens"], claude["budget"])  # within its tokens
+        self.assertTrue(claude["trimmed"])  # but cut to its 9,500 characters, as the hook cuts it
 
     def test_compact_and_resume_outcomes_are_counted_for_the_report(self) -> None:
         self.cli(
@@ -401,6 +467,20 @@ class DoctorCommandTests(unittest.TestCase):
         golden_check = next(c for c in report["checks"] if c["id"] == "golden")
         self.assertEqual([False], [item["ok"] for item in golden_check["value"]])
         self.assertIn("缺 GLOBAL USER PREFERENCES", markdown)
+
+    def test_a_golden_query_for_reference_is_info_when_it_fails(self) -> None:
+        # The Codex start pack: the user works in Claude Code (designer 2026-10-22).
+        golden = self.config_home / "doctor" / "golden.toml"
+        entry = ('[[query]]\nkind = "session"\ntext = "start pack"\ncwd = "/work/x"\nagent = "codex"\n'
+                 'expected_sections = ["GLOBAL USER PREFERENCES"]\n')
+        golden.write_text(entry + 'level = "info"\n', encoding="utf-8")
+        _, report = self.doctor()
+        reference = next(c for c in report["checks"] if c["id"] == "golden")
+        golden.write_text(entry, encoding="utf-8")
+        _, report = self.doctor()
+        counted = next(c for c in report["checks"] if c["id"] == "golden")
+        self.assertEqual(("INFO", "0/1 通過（只供參考、沒過：開場包 x/codex）"), (reference["status"], reference["detail"]))
+        self.assertEqual("WARN", counted["status"])
 
     def test_idle_or_legacy_capsules_never_warn(self) -> None:
         sessions = self.memory_home / "sessions"

@@ -8,7 +8,7 @@
    records。
 3. Project status 的回答必須合併歷史 memory 與 fresh repo/tests/runtime verification。不得把
    舊 checkpoint、fact 或 prior result 當成 current confirmed state。
-4. Hook 只作靜默 transport：預算依 agent（Codex 開場 2800／查詢 1800，Claude Code
+4. Hook 只作靜默 transport：預算依 agent（Codex 開場 3400／查詢 1800，Claude Code
    5000／3000），另受各區塊自己的上限約束；開場只載入 critical／high 偏好。
    UserPromptSubmit 只有非空查詢命中才注入 relevant knowledge，且只收分數達最高分六成
    的候選；別的專案的紀錄只在查詢點名該專案時才出現。空查詢、miss、error 都 fail-open。

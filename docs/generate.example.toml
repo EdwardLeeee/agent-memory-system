@@ -1,0 +1,39 @@
+# Markdown views of the ledger, kept where another tool reads them (for
+# example a Claude Code project memory file). Copy to
+# ~/.config/agent-memory/generate.toml. The ledger stays the record: the file
+# is regenerated after `memoryctl record` or `supersede` writes a record it
+# shows (or showed), and by the weekly doctor; `memoryctl generate run` does
+# it by hand and `memoryctl generate list` shows what the next run would do.
+#
+# A file the memory system did not write, or another copy of the ledger
+# wrote, is never replaced until you run `memoryctl generate run --adopt`
+# (its original is backed up first); a written file someone edited by hand
+# is backed up before it is written again. Backups go to
+# ~/.config/agent-memory/generate-backups/<name>/. A path inside a git
+# repository, or a link, is refused: generated files never go into a project.
+
+# The ledger these files are generated from. A copy of the ledger runs with a
+# copy of this file, so from anywhere else nothing is written, not even a file
+# this ledger has not written yet.
+store = "~/agent-memory"
+
+[[target]]
+name = "my-app-lead-errors"
+path = "~/.claude/projects/-home-you-src-my-app/memory/lead-errors.md"
+# Filters: all given must hold; any value of one will do. origin is the
+# project a record belongs to (its origin field, a project scope, or the
+# project its id names).
+kind = "failure"
+id_prefix = "failure.my-app.lead_"
+# origin = "my-app"
+# scope = ["project:my-app"]
+# tag = ["lead"]
+intro = "When corrected, record the case with memoryctl record in the same turn."
+# What Claude Code's memory folder expects at the top of a file.
+frontmatter = { name = "my-app-lead-errors", description = "The lead's own mistakes, grouped by pattern", type = "feedback" }
+
+# Optional sections: a record goes under the first group whose tag it
+# carries; the rest under 其他.
+[[target.group]]
+tag = "pattern-1"
+title = "Pattern 1: stating a number before checking it"

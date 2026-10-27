@@ -487,7 +487,7 @@ key，但內容仍保存原 ID。ID resolution 順序為 explicit `--session-id`
 時 manual checkpoint 使用 machine-derived ID。
 
 SessionStart renderer 將此 capsule 視為最高優先資料，另外只接受 active、未過期、
-`source=user-stated`、`scope=global` 的 preferences。沒有軟目標，hard limit 2800；超限先移除其他 session summaries，再以完整 preference 為單位
+`source=user-stated`、`scope=global` 的 preferences。沒有軟目標，hard limit 依 agent（Codex 3400，Claude Code 5000）；超限先移除其他 session summaries，再以完整 preference 為單位
 保留 priority prefix。較高優先 preference 若無法完整放入，後面的低優先項目不會越過它。
 Decision、experience、failure、fact 與 machine state 不屬於 SessionStart schema。
 

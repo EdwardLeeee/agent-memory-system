@@ -65,7 +65,7 @@ def _merge_guidance(existing: str, block: str) -> str:
 
 
 def _memory_hook_group(
-    event: str, command: str, *, spill_threshold: int | None = None
+    event: str, command: str, *, spill_threshold: int | None = None, agent: str = ""
 ) -> dict[str, Any]:
     handler: dict[str, Any] = {
         "type": "command",
@@ -82,7 +82,8 @@ def _memory_hook_group(
     elif event == "PreToolUse":
         # Runs before every shell command and blocks it while running; the
         # hook gives up after two seconds itself, this is the outer bound.
-        group["matcher"] = "Bash"
+        # Claude's also sees what the agent sends (spec 實際使用回饋改善 F13).
+        group["matcher"] = "Bash|SendMessage|AskUserQuestion" if agent == "claude" else "Bash"
         handler["timeout"] = 5
     return group
 
@@ -123,6 +124,7 @@ def _apply_memory_hooks(
                 event,
                 f"{executable} hook {cli_event} --agent {agent}",
                 spill_threshold=spill_threshold,
+                agent=agent,
             )
         )
 

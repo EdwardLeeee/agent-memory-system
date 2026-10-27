@@ -30,7 +30,7 @@ This is not a plugin that nags the model. Hooks stay silent when nothing is rele
 - **Lessons at the moment of risk.** Failure records carry `retry_when` text. A PreToolUse hook matches the shell command the agent is about to run against those lessons and attaches the matching failure next to the command's result. A short, user-curated list of destructive commands (force push, `rm -rf`, `reset --hard`, …) is held once per session with the lesson shown, then allowed.
 - **Decisions calibrated by outcomes.** A decision is a working choice, not a rule. Experiences link to decisions as `supports`, `contradicts`, `narrows` or `inconclusive`; counts and the latest counterevidence are shown with the decision. Changing a decision requires `supersede` with a change driver and reason; old versions stay in the audit chain.
 - **Project knowledge federated, not copied.** A project's own ADRs, settlement files, notes and git log are indexed read-only through a parser config. Recurring root causes across reports become lesson candidates automatically; nothing is written into the ledger behind your back.
-- **Self-measurement.** A weekly `memoryctl doctor` report checks the plumbing and measures whether injected memories were actually cited; `memoryctl rate` is a short weekly questionnaire on the memories you were shown.
+- **Self-measurement.** A weekly `memoryctl doctor` report checks the plumbing and measures whether injected memories were actually used, judged from what the agent wrote; `memoryctl rate` is a short weekly questionnaire on the memories you were shown.
 
 ## Why a routing tree instead of one big RAG
 
@@ -70,14 +70,15 @@ Writes are atomic (temp file + rename) and serialized by a file lock. Every writ
 
 | Event | What is injected | Budget (Claude Code / Codex) |
 |---|---|---|
-| SessionStart | the session's resume capsule, critical and high preferences, up to three other active tasks, PROJECT LESSONS when the cwd is a federated project | 5000 / 2800 tokens |
-| UserPromptSubmit | the routed Context Pack for this prompt, grouped as NON-NEGOTIABLE CONSTRAINTS, WORKING DECISIONS, RELEVANT EXPERIENCES, REFERENCE DATA, PROJECT LESSONS, SOURCE IDS | 3000 / 1800 tokens |
+| SessionStart | the session's resume capsule, critical and high preferences, up to three other active tasks, PROJECT LESSONS when the cwd is a federated project | 5000 / 3400 tokens |
+| UserPromptSubmit | the routed Context Pack for this prompt, grouped as NON-NEGOTIABLE CONSTRAINTS, WORKING DECISIONS, RELEVANT EXPERIENCES, REFERENCE DATA, PROJECT LESSONS, SOURCE IDS; led, in Claude Code, by `上一則回覆可能需要更正：…（id）` ("your last reply may need correcting") when that reply matched a failure's `outbound_triggers` | 3000 / 1800 tokens |
 | PreToolUse (Bash) | `FOR THIS COMMAND`: up to two failure lessons whose trigger matches the command; or a one-time hold for a command on the danger list | 600 / 400 tokens |
+| PreToolUse (SendMessage, AskUserQuestion; Claude Code only) | `送出的內容可能需要再查：` ("what you are sending may need checking"): up to two failure lessons whose `outbound_triggers` match what is about to be sent; never a hold | 600 tokens |
 | PreCompact | nothing; writes a local marker only | - |
 
 Every hook exits 0 and returns `{"continue": true}` on any error; the PreToolUse hook also gives up on its own after two seconds, since it runs before every shell command. Errors are recorded in a small machine-local health file, never shown to the model. No Stop hook is installed.
 
-Each Context Pack begins with one line, in Traditional Chinese, asking the agent to write `依據 <id>` ("per <id>") when it acts on a memory. That one line is what makes citation measurable.
+Whether the agent used a memory is judged from what it wrote, not asked for: before the user's next message, its replies or tool inputs name the record's id, or repeat something particular to the record (a long path, a commit hash, a measure with a unit, an eight-character Chinese or four-word English phrase) that the user's own messages did not hold. Only with the router off does a pack still begin with a line asking for `依據 <id>` ("per <id>").
 
 ### Evidence, not confidence scores
 
@@ -128,6 +129,7 @@ Optional:
 cp ~/agent-memory-system/docs/router.example.toml ~/.config/agent-memory/router.toml   # budgets, topic words, danger list
 memoryctl doctor install-timer --enable      # weekly health report via systemd --user (Linux)
 memoryctl sources sync <project>             # after writing ~/.config/agent-memory/sources.d/<project>.toml
+cp ~/agent-memory-system/docs/generate.example.toml ~/.config/agent-memory/generate.toml   # Markdown views of chosen records
 ```
 
 The herdr integration is optional: a danger-list entry for `herdr server stop`, the word herdr in the agents topic, and a doctor notification sent through herdr when it is installed. Without herdr none of them does anything.
@@ -148,7 +150,10 @@ The commands behind it:
 | Command | Purpose |
 |---|---|
 | `memoryctl record --kind <kind> --input file.json` | write a preference, fact, decision, experience, failure or task |
-| `memoryctl checkpoint --input file.json` | save this session's resume capsule (the session id comes from the agent's environment) |
+| `memoryctl checkpoint --input file.json` | save this session's resume capsule (the session id comes from the agent's environment); an optional `tasks` list keeps one line per task |
+| `memoryctl checkpoint --set FIELD=VALUE` / `--show` | change the saved capsule in place, a field or `tasks.<id>.status=done`; print it |
+| `memoryctl template <kind>` | the JSON skeleton of a record, a supersede or a checkpoint; a write missing fields names all of them |
+| `memoryctl task done <id>` | mark a task done (a task may carry `due`, a time with its zone; open ones due within a day are listed at session start) |
 | `memoryctl supersede --id <id> --input file.json` | replace an active record with a new version and a reason |
 | `memoryctl context --cwd DIR --query TEXT [--agent claude|codex] [--explain]` | see exactly what a prompt would inject, with node and score per record |
 | `memoryctl search --query TEXT [--include-archive]` | look into history: archived versions, events, idle capsules |
@@ -169,7 +174,7 @@ Example inputs for every record kind are in `examples/`.
 | fact | a verified, possibly expiring statement (`expires_at`); machine-scoped facts never leave their machine | entity words (host, tool, alias) |
 | decision | value, rationale, constraints, alternatives, consequences, revisit_when | the project or topic node |
 | experience | situation, expectation, action, observed outcome, applicability, decision links | the project or topic node; pulled in as evidence of a decision |
-| failure | symptom, attempt, root cause, verified fix, retry_when, evidence, optional `triggers` regexes | the command about to run; this project's failures also by words |
+| failure | symptom, attempt, root cause, verified fix, retry_when, evidence, optional `triggers` regexes (for commands) and `outbound_triggers` (for what the agent says) | the command about to run; what Claude Code is about to send, or just replied; this project's failures also by words |
 | task / checkpoint | long-lived task fact / this session's bounded resume state | history / exact session id |
 
 Scopes: `global`, `project:<name>`, `workspace:<name>`, `machine:<uuid>`. Machine scope is a hard filter.
@@ -197,7 +202,7 @@ Scopes: `global`, `project:<name>`, `workspace:<name>`, `machine:<uuid>`. Machin
 
 ## Measuring whether it helps
 
-- **`memoryctl doctor run`** (weekly timer optional) checks: unpushed commits, hook health, startup pack sizes per agent, preference growth, stale capsules, source sync freshness, golden queries, a test run when memory allows, and its own peak RSS. Effect signals: citation rate of injected records, injected-but-never-cited records, repeated mistakes, repeated preference statements, recovery success after compaction, and the failure layer's hits.
+- **`memoryctl doctor run`** (weekly timer optional) checks: unpushed commits, hook health, startup pack sizes per agent, preference growth, stale capsules, source sync freshness, golden queries, a test run when memory allows, and its own peak RSS. Effect signals: usage rate of injected records (by id and by content), injected-but-never-used records, repeated mistakes, repeated preference statements, recovery success after compaction, and the failure layer's hits.
 - **`memoryctl rate`** asks about a dozen questions on memories you were shown this week; answers stay in a local file.
 - **Golden queries** (`doctor/golden.toml`) pin what known questions must and must not return, so retrieval changes cannot silently regress.
 - A paired memory-on/off pilot on 12 synthetic cases (6 retrieval, 6 compact-and-resume) found memory-on passing 11/12 against 3/12 for memory-off. One run per case; a directional result, not a population effect. Details in `docs/EVALUATION.md`; the evaluation suites themselves are not part of this repository.
@@ -215,9 +220,11 @@ The author works in Traditional Chinese, so some texts a user or the agent sees 
 
 | Text | Where it appears | Can you change it? |
 |---|---|---|
-| `採用某筆記憶時，請在回覆寫一次「依據 <id>」。` ("when you act on a memory, write `依據 <id>` once") | first line of every Context Pack | No setting; it is `CITATION_REQUEST` in `agent_memory/storage.py`. Citation counting looks for `依據 <id>`. |
+| `採用某筆記憶時，請在回覆寫一次「依據 <id>」。` ("when you act on a memory, write `依據 <id>` once") | first line of a Context Pack when the router is off | No setting; it is `CITATION_REQUEST` in `agent_memory/storage.py`. With the router on, usage is judged from what the agent wrote. |
 | Danger-list reasons, for example `強制推送會覆蓋遠端歷史；…` | the hold message of a PreToolUse speed bump | Yes: copy the `[[failures.speed_bump]]` list from `docs/router.example.toml` into `router.toml` and write your own `reason` (the list replaces the built-in one). |
 | `本 session 尚未確認過這類指令；確認後再執行一次就會放行。` ("not confirmed in this session yet; run it again to proceed") | appended to every hold message | No setting; `RELEASE_LINE` in `agent_memory/pretool.py`. |
+| `由記憶系統自動產生，不要手改；新增或修改請用 memoryctl record／supersede` ("generated by the memory system; do not edit; use memoryctl record or supersede") | the top of every generated Markdown file | No setting; `MARKER` in `agent_memory/generate.py`. It also marks a file as one the memory system may rewrite. |
+| `送出的內容可能需要再查：` and `上一則回覆可能需要更正：` | before a lesson about what the agent is sending, and before the line about its last reply | No setting; `OUTBOUND_HEADER` and `CORRECTION_PREFIX` in `agent_memory/turns.py`. |
 | Pack helper lines: `- 學到的地方：…` (where a lesson was learned), `更多：memoryctl search --query <詞>`, `（其餘 N 條：…）`, the PROJECT LESSONS orientation line and `目前沒有教訓候選；…` | inside Context Packs | No setting; `agent_memory/pretool.py`, `router.py`, `core.py`. |
 | Some default topic words (`記憶`, `記憶體`, `閘門`, …) | which knowledge topics a prompt opens | Yes: `[knowledge]` topics in `router.toml`. |
 | The `memoryctl doctor` report and its notification, the `memoryctl rate` questions | your terminal and report folder | No setting; `agent_memory/doctor.py`, `rating.py`. |
@@ -237,7 +244,7 @@ agent_memory/      core.py (ledger, packs), router.py (routing tree), pretool.py
                    federation.py, doctor.py, rating.py, adapters.py, storage.py, cli.py
 bin/memoryctl      entry point; fast path for the PreToolUse hook
 adapters/          guidance snippets merged into CLAUDE.md / AGENTS.md / GEMINI.md
-docs/              ARCHITECTURE.md, SCHEMA.md, EVALUATION.md, HANDBOOK.zh-TW.md, router.example.toml, sources.example.toml
+docs/              ARCHITECTURE.md, SCHEMA.md, EVALUATION.md, HANDBOOK.zh-TW.md, router.example.toml, sources.example.toml, generate.example.toml
 examples/          JSON inputs for each record kind
 tests/             unit and integration tests, byte-identical routing baseline fixture
 tools/             benchmarks (their suites are not shipped), the handbook builder, the public export

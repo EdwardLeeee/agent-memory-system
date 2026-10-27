@@ -47,6 +47,37 @@ class EmbeddingProfileTests(unittest.TestCase):
         )
 
 
+class EncoderTelemetryTests(unittest.TestCase):
+    def test_the_encoder_turns_onnxruntime_telemetry_off_where_it_can(self) -> None:
+        # onnxruntime 1.31 sends telemetry events and keeps a device id (F17; designer 2026-10-22).
+        from agent_memory import embedding
+
+        def fakes(with_switch: bool) -> tuple[dict, mock.Mock]:
+            ort = types.SimpleNamespace(
+                SessionOptions=mock.Mock, GraphOptimizationLevel=types.SimpleNamespace(ORT_ENABLE_EXTENDED=1),
+                InferenceSession=mock.Mock(return_value=mock.Mock(get_inputs=lambda: [])))
+            switch = mock.Mock()
+            if with_switch:
+                ort.disable_telemetry_events = switch
+            tokenizer = mock.Mock(padding=True)
+            tokenizers = types.SimpleNamespace(AddedToken=mock.Mock, Tokenizer=types.SimpleNamespace(from_file=lambda path: tokenizer))
+            return {"onnxruntime": ort, "numpy": types.SimpleNamespace(), "tokenizers": tokenizers}, switch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, data in (("config.json", {}), ("tokenizer_config.json", {"pad_token": "<pad>"}),
+                               ("special_tokens_map.json", {})):
+                (root / name).write_text(json.dumps(data), encoding="utf-8")
+            profile = embedding.PROFILES[embedding.DEFAULT_PROFILE_NAME]
+            modules, switch = fakes(True)
+            with mock.patch.dict(sys.modules, modules):
+                embedding.LocalOnnxEncoder(root, profile)
+            older, _ = fakes(False)  # a version without the switch still loads
+            with mock.patch.dict(sys.modules, older):
+                embedding.LocalOnnxEncoder(root, profile)
+        switch.assert_called_once_with()
+
+
 class SemanticDocumentTests(unittest.TestCase):
     def test_fact_passage_excludes_identity_metadata_and_evidence(self) -> None:
         from agent_memory.semantic_document import build_semantic_document

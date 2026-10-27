@@ -8,6 +8,7 @@ it produces is injected into any model's context.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -167,8 +168,11 @@ def check_hook_agents(configs: dict[str, Path] = HOOK_CONFIGS) -> dict[str, Any]
                   "；".join(f"{k}：{v}" for k, v in rows.items()))
 
 
+PREFERENCE_SHARE_WARN = 0.85
+
+
 def check_session_packs(root: Path, cwds: list[Path], lesson_cwds: set[Path] = frozenset()) -> dict[str, Any]:
-    from .core import AGENT_HOOK_BUDGETS, _compose_session_context
+    from .core import AGENT_HOOK_BUDGETS, CLAUDE_HOOK_CHAR_LIMIT, _compose_session_context
 
     rows = []
     warn = False
@@ -176,8 +180,10 @@ def check_session_packs(root: Path, cwds: list[Path], lesson_cwds: set[Path] = f
         for agent in ("claude", "codex"):
             budget = AGENT_HOOK_BUDGETS[agent][0]
             try:
+                # As the hook builds it: Claude's pack under its character limit too (review 2, item 17).
                 _, stats = _compose_session_context(
-                    root, cwd, None, source="startup", budget_tokens=budget, allow_reindex=False
+                    root, cwd, None, source="startup", budget_tokens=budget, allow_reindex=False,
+                    char_limit=CLAUDE_HOOK_CHAR_LIMIT if agent == "claude" else None,
                 )
             except Exception as exc:  # a broken pack is exactly what this reports
                 rows.append({"cwd": str(cwd), "agent": agent, "error": type(exc).__name__})
@@ -189,13 +195,20 @@ def check_session_packs(root: Path, cwds: list[Path], lesson_cwds: set[Path] = f
             # listed as information: Codex's smaller budget makes it routine.
             lessons_missing = cwd in lesson_cwds and not stats.get("project_lessons_included")
             flagged = bool(stats["trimmed"]) or tokens > BUDGET_WARN_RATIO * budget
-            warn = warn or lessons_missing
+            # Preferences taking most of the budget crowd out the rest; the
+            # longest are named so the user can be asked (spec F11 ruling).
+            share = int(stats.get("preference_tokens") or 0) / budget
+            crowded = share > PREFERENCE_SHARE_WARN
+            warn = warn or lessons_missing or crowded
             rows.append({"cwd": str(cwd), "agent": agent, "tokens": tokens, "budget": budget,
                          "trimmed": bool(stats["trimmed"]), "lessons_missing": lessons_missing,
-                         "flagged": flagged})
+                         "flagged": flagged, "preference_share": round(share, 3), "crowded": crowded,
+                         "longest_preferences": stats.get("longest_preferences") or []})
     detail = "；".join(
         f"{Path(r['cwd']).name or '~'}/{r['agent']} " + (r.get("error") or f"{r['tokens']}/{r['budget']}"
-        + ("（裁切）" if r["trimmed"] else "") + ("（缺 PROJECT LESSONS）" if r.get("lessons_missing") else ""))
+        + ("（裁切）" if r["trimmed"] else "") + ("（缺 PROJECT LESSONS）" if r.get("lessons_missing") else "")
+        + (f"（偏好占 {r['preference_share']:.0%}，最長："
+           + "、".join(f"{p['id']} {p['tokens']}" for p in r["longest_preferences"]) + "）" if r.get("crowded") else ""))
         for r in rows
     )
     return _check("session_packs", "模擬開場包", warn, rows, detail)
@@ -271,6 +284,41 @@ def check_capsules(root: Path, now: datetime, projects_dir: Path) -> dict[str, A
                   f"對不上任何 session {len(unmatched)} 份")
 
 
+def check_speed_bump_failures(root: Path, config_root: Path) -> dict[str, Any]:
+    """The records router.toml's [failures.speed_bump_failures] shows when a
+    speed bump holds a command, in every project: one gone, or folded into a
+    general lesson (applies = origin, or its text names one), should give
+    way to that one (kill-by-name still named one of four shell lessons
+    after they were merged into one: designer 2026-10-27)."""
+    from .core import pointer_only
+    from .merge_drafts import GENERAL_RE, _load
+    from .storage import load_router_settings
+
+    links = load_router_settings(config_root / "router.toml").get("speed_bump_failures") or {}
+    named = [(bump, failure_id) for bump, failure_ids in sorted(links.items()) for failure_id in failure_ids]
+    problems = []
+    for bump, failure_id in named:
+        found = _load(root, failure_id)
+        if found is None:
+            problems.append({"bump": bump, "id": failure_id, "why": "不存在（或已不是 active）", "suggest": None})
+            continue
+        metadata, body = found
+        general = GENERAL_RE.search(body)
+        suggest = general.group(1) if general and general.group(1) != failure_id else None
+        if metadata.get("applies") == "origin":
+            problems.append({"bump": bump, "id": failure_id, "why": "已併入通用教訓（applies=origin），只該在學到的專案提醒",
+                             "suggest": suggest})
+        elif suggest:
+            problems.append({"bump": bump, "id": failure_id, "why": f"內容指向通用教訓 {suggest}", "suggest": suggest})
+        elif pointer_only(metadata, body):
+            problems.append({"bump": bump, "id": failure_id, "why": "內容只指向別處的文件", "suggest": None})
+    detail = "；".join(f"{item['bump']} 指名的 {item['id']} {item['why']}"
+                      + (f"，建議改成 {item['suggest']}" if item["suggest"] else "，建議換成現有的紀錄或拿掉")
+                      for item in problems)
+    return _check("speed_bump_failures", "減速帶指名的紀錄（router.toml）", bool(problems), problems,
+                  detail or (f"{len(named)} 筆都在，沒有併入別筆" if named else "沒有指名紀錄"))
+
+
 def check_sources(config_root: Path) -> dict[str, Any]:
     from .federation import FederationConfigError, list_source_configs, load_source_config
 
@@ -325,6 +373,64 @@ def check_sources(config_root: Path) -> dict[str, Any]:
     return _check("sources", "來源同步", warn, rows, "；".join(f"{r['source']}：{detail(r)}" for r in rows))
 
 
+def check_due_tasks(root: Path) -> dict[str, Any]:
+    """Open tasks more than a week past due: a session start no longer lists
+    them (spec 騰訊借鏡改善 T4)."""
+    from .core import DUE_BEHIND, _due_now, due_tasks
+
+    now = _due_now()
+    try:
+        late = [task for task in due_tasks(root, None, everywhere=True) if task["due"] < now - DUE_BEHIND]
+    except Exception as exc:  # never stops the report
+        return _check("due_tasks", "過期的待辦", True, None, f"讀不到：{str(exc)[:200]}")
+    detail = "；".join(f"{task['id']}（過期 {(now - task['due']).days} 天）" for task in late[:10]) or "沒有過期超過 7 天的"
+    return _check("due_tasks", "過期的待辦", bool(late), [task["id"] for task in late],
+                  detail + ("→ 做完就 memoryctl task done <id>，不做了就 supersede 改掉" if late else ""))
+
+
+_GENERATE_WORDS = {
+    "created": "新建", "updated": "已更新", "unchanged": "沒有變", "adopted": "已接手（原檔已備份）",
+    "hand-written": "是手寫的檔案，沒有覆蓋（確認後用 memoryctl generate run --adopt 接手）",
+    "other-store": "是另一份帳本寫的（例如這是帳本副本），沒有覆蓋（這份是正本的話，用 memoryctl generate run --adopt 接手）",
+    "not-this-store": "generate.toml 寫的是另一份帳本（例如這是帳本副本），沒有寫",
+    "missing-folder": "資料夾不存在", "error": "寫入失敗",
+}
+
+
+def check_generated(root: Path, config_root: Path) -> dict[str, Any]:
+    """Regenerates the Markdown files generate.toml names (spec 實際使用回饋
+    改善 F14) and warns on a target left alone, a backup of a file changed by
+    hand, or a problem in generate.toml."""
+    from . import generate
+
+    if not (config_root / generate.GENERATE_TOML_NAME).exists():
+        return _check("generate", "產生的檔案", False, None, "沒有 generate.toml", skipped=True)
+    try:
+        result = generate.run(root, config_root=config_root)
+    except Exception as exc:  # never stops the report
+        return _check("generate", "產生的檔案", True, None, f"產生失敗：{str(exc)[:200]}")
+    rows = result["targets"]
+    warn = bool(result["problems"]) or any(
+        row["status"] in ("hand-written", "other-store", "not-this-store", "missing-folder", "error") or row.get("backup")
+        for row in rows)
+    details = [
+        f"{row['name']}：{_GENERATE_WORDS.get(row['status'], row['status'])}，{row['records']} 筆"
+        + (f"；有人改過，已備份到 {row['backup']}" if row.get("backup") and row["status"] != "adopted" else "")
+        for row in rows
+    ]
+    return _check("generate", "產生的檔案", warn, [{key: row.get(key) for key in ("name", "status", "records")} for row in rows],
+                  "；".join(details + result["problems"]))
+
+
+def _record_blocks(context: str) -> list[str]:
+    """Each record block of a pack (### <id> up to the next heading)."""
+    found = []
+    for block in re.split(r"(?=^### )", context, flags=re.M):
+        if block.startswith("### "):
+            found.append(re.split(r"^## ", block, maxsplit=1, flags=re.M)[0])
+    return found
+
+
 def _ids_and_scores(context: str) -> tuple[list[tuple[str, int]], list[str]]:
     scored = []
     for block in re.split(r"(?=^### )", context, flags=re.M):
@@ -361,7 +467,6 @@ def _top_problem(top: str, scored: list[tuple[str, int]], nodes: dict[str, str])
 
 
 def run_golden(root: Path, config_root: Path) -> dict[str, Any]:
-    from .core import AGENT_HOOK_BUDGETS, _render_context
     from .federation import FederationConfigError, parse_minimal_toml
 
     path = config_root / "doctor" / "golden.toml"
@@ -369,51 +474,96 @@ def run_golden(root: Path, config_root: Path) -> dict[str, Any]:
         queries = parse_minimal_toml(path.read_text(encoding="utf-8")).get("query", [])
     except (OSError, FederationConfigError) as exc:
         return _check("golden", "黃金查詢", True, [], f"讀不到 {path}：{exc}")
-    results, failed = [], 0
-    for query in queries:
-        cwd = Path(str(query.get("cwd", "~"))).expanduser()
-        text = str(query.get("text", ""))
-        if query.get("kind") == "session":
-            result = _golden_session(root, cwd, str(query.get("agent", "codex")), query)
-            results.append(result)
-            failed += not result["ok"]
-            continue
-        agent = str(query.get("agent", "claude"))
-        if agent not in AGENT_HOOK_BUDGETS:
-            results.append({"text": text, "cwd": str(cwd), "ok": False, "why": f"未知 agent {agent}"})
-            failed += 1
-            continue
-        try:
-            context = _render_context(
-                root, cwd, text, AGENT_HOOK_BUDGETS[agent][1], explain=True, allow_reindex=False, agent=agent
-            )
-        except Exception as exc:
-            results.append({"text": text, "ok": False, "why": type(exc).__name__})
-            failed += 1
-            continue
-        scored, lessons = _ids_and_scores(context)
-        ids = [record_id for record_id, _ in scored]
-        every = ids + lessons
-        problems = []
-        for expected in query.get("expected_ids", []):
-            if expected not in every:
-                problems.append(f"缺 {expected}")
-        prefixes = query.get("expected_prefixes", [])
-        if prefixes and not any(i.startswith(tuple(prefixes)) for i in every):
-            problems.append("沒有任何 " + "／".join(prefixes))
-        forbidden = tuple(query.get("forbidden_prefixes", []))
-        problems += [f"含禁止前綴 {i}" for i in every if forbidden and i.startswith(forbidden)]
-        allowed = tuple(query.get("allowed_prefixes", []))
-        problems += [f"不在允許前綴 {i}" for i in ids if allowed and not i.startswith(allowed)]
-        problems += [f"缺 {section}" for section in query.get("expected_sections", []) if f"## {section}" not in context]
-        if str(query.get("max_results", "")).isdigit() and len(ids) > int(query["max_results"]):
-            problems.append(f"{len(ids)} 筆 > {query['max_results']}")
-        top = str(query.get("top_id", ""))
-        if top and _top_problem(top, scored, _block_nodes(context)):
-            problems.append(f"最高分不是 {top}")
-        results.append({"text": text, "cwd": str(cwd), "count": len(ids), "ok": not problems, "why": "；".join(problems)})
-        failed += bool(problems)
-    return _check("golden", "黃金查詢", failed > 0, results, f"{len(results) - failed}/{len(results)} 通過")
+    # An entry with level = "info" is for reference: failing, it is shown as
+    # INFO, not a WARN (the Codex start pack: the user works in Claude Code;
+    # designer 2026-10-22).
+    results = [{**_query_check(root, query), **({"reference": True} if query.get("level") == "info" else {})}
+               for query in queries]
+    failed = sum(not result["ok"] and not result.get("reference") for result in results)
+    reference = [result["text"] for result in results if not result["ok"] and result.get("reference")]
+    passed = sum(result["ok"] for result in results)
+    detail = f"{passed}/{len(results)} 通過" + (f"（只供參考、沒過：{'、'.join(reference)}）" if reference else "")
+    check = _check("golden", "黃金查詢", failed > 0, results, detail)
+    if not failed and reference:
+        check["status"] = "INFO"
+    return check
+
+
+def run_probes(root: Path, config_root: Path) -> dict[str, Any]:
+    """Fixed probe prompts beside golden (spec 實際使用回饋改善 F3 ruling):
+    for each project a lone code name, a word common in that project, and a
+    phrase as people talk, each with the ids that must or must not appear
+    and a one-line reason. Checked like golden, on the pack as the hook
+    gives it: without the explain lines, which take room in the budget."""
+    from .federation import FederationConfigError, parse_minimal_toml
+
+    path = config_root / "doctor" / "probes.toml"
+    if not path.exists():
+        return _check("probes", "探測問句", False, [], f"沒有 {path}")
+    try:
+        probes = parse_minimal_toml(path.read_text(encoding="utf-8")).get("probe", [])
+    except (OSError, FederationConfigError) as exc:
+        return _check("probes", "探測問句", True, [], f"讀不到 {path}：{exc}")
+    results = [{**_query_check(root, probe, explain=False), "reason": str(probe.get("reason", ""))} for probe in probes]
+    failed = sum(not result["ok"] for result in results)
+    return _check("probes", "探測問句", failed > 0, results, f"{len(results) - failed}/{len(results)} 通過")
+
+
+def _query_check(root: Path, query: dict[str, Any], explain: bool = True) -> dict[str, Any]:
+    """One golden query or probe: the pack a prompt gets, held against what
+    the entry expects. A top_id needs the scores `explain` adds."""
+    from .core import AGENT_HOOK_BUDGETS, _render_context
+
+    cwd = Path(str(query.get("cwd", "~"))).expanduser()
+    text = str(query.get("text", ""))
+    if query.get("kind") == "session":
+        return _golden_session(root, cwd, str(query.get("agent", "codex")), query)
+    agent = str(query.get("agent", "claude"))
+    if agent not in AGENT_HOOK_BUDGETS:
+        return {"text": text, "cwd": str(cwd), "ok": False, "why": f"未知 agent {agent}"}
+    try:
+        # Without the rating feedback: golden results never move with it (A1).
+        context = _render_context(
+            root, cwd, text, AGENT_HOOK_BUDGETS[agent][1], explain=explain, allow_reindex=False, agent=agent,
+            feedback=False,
+        )
+    except Exception as exc:
+        return {"text": text, "ok": False, "why": type(exc).__name__}
+    scored, lessons = _ids_and_scores(context)
+    ids = [record_id for record_id, _ in scored]
+    every = ids + lessons
+    problems = []
+    # What answers a query is what the prompt brought: a PROJECT LESSONS
+    # line comes every turn in its project, whatever was asked (retrieval
+    # review). A forbidden id is wrong anywhere.
+    for expected in query.get("expected_ids", []):
+        if expected not in ids:
+            problems.append(f"缺 {expected}")
+    problems += [f"含不該出現的 {i}" for i in query.get("forbidden_ids", []) if i in every]
+    # Any one of several right answers (designer 2026-10-21): a probe whose
+    # ranking moves with the ledger names them all.
+    any_of = query.get("expected_any_ids", [])
+    if any_of and not any(i in ids for i in any_of):
+        problems.append("一筆都沒有：" + "、".join(any_of))
+    # A word one of the records brought holds, in any case: a lone code name
+    # is not blocked whole by the relevance floor (designer 2026-10-21).
+    blocks = [block.casefold() for block in _record_blocks(context)]
+    problems += [f"沒有一筆提到 {word}" for word in query.get("expected_mentions", [])
+                 if not any(str(word).casefold() in block for block in blocks)]
+    prefixes = query.get("expected_prefixes", [])
+    if prefixes and not any(i.startswith(tuple(prefixes)) for i in every):
+        problems.append("沒有任何 " + "／".join(prefixes))
+    forbidden = tuple(query.get("forbidden_prefixes", []))
+    problems += [f"含禁止前綴 {i}" for i in every if forbidden and i.startswith(forbidden)]
+    allowed = tuple(query.get("allowed_prefixes", []))
+    problems += [f"不在允許前綴 {i}" for i in ids if allowed and not i.startswith(allowed)]
+    problems += [f"缺 {section}" for section in query.get("expected_sections", []) if f"## {section}" not in context]
+    if str(query.get("max_results", "")).isdigit() and len(ids) > int(query["max_results"]):
+        problems.append(f"{len(ids)} 筆 > {query['max_results']}")
+    top = str(query.get("top_id", ""))
+    if top and _top_problem(top, scored, _block_nodes(context)):
+        problems.append(f"最高分不是 {top}")
+    return {"text": text, "cwd": str(cwd), "count": len(ids), "ok": not problems, "why": "；".join(problems)}
 
 
 def _golden_session(root: Path, cwd: Path, agent: str, query: dict[str, Any]) -> dict[str, Any]:
@@ -450,13 +600,18 @@ def check_audit(root: Path) -> dict[str, Any]:
 PEAK_MEMORY_WARN_MB = 600
 
 
-def check_peak_memory() -> dict[str, Any]:
-    """This run's own peak memory: a regression guard for streaming reads."""
+def check_peak_memory(child_mb: float | None = None) -> dict[str, Any]:
+    """This run's own peak memory: a regression guard for streaming reads.
+    The embedding child's peak is shown beside it; both count against the
+    run's cap."""
     import resource
 
     peak_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    detail = f"{peak_mb} MB（上限警示 {PEAK_MEMORY_WARN_MB} MB）"
+    if child_mb:
+        detail += f"；向量子行程 {child_mb} MB，兩者合計 {round(peak_mb + child_mb, 1)} MB（上限 {CAP_MEMORY}）"
     return _check("peak_memory", "本次檢查峰值記憶體", peak_mb > PEAK_MEMORY_WARN_MB,
-                  {"peak_mb": peak_mb}, f"{peak_mb} MB（上限警示 {PEAK_MEMORY_WARN_MB} MB）")
+                  {"peak_mb": peak_mb, "semantic_child_mb": child_mb}, detail)
 
 
 # Every manual run caps itself, not only the timer's unit: re-exec under a
@@ -561,103 +716,43 @@ def record_nodes(root: Path) -> Callable[[str], str]:
     return lookup
 
 
-_SEARCH_COMMAND_RE = re.compile(r"^\s*(?:\S*/)?memoryctl\s+search\b")
-_MEMORY_REPO = Path.home() / "agent-memory"
+def usage_signal(sessions: dict[str, Any], node_of: Callable[[str], str]) -> dict[str, Any]:
+    """This week's use of what the hooks gave, from the whole-session
+    measure (spec 實際使用回饋改善 F12): the share used, named by id and by
+    content apart, by routing node, the records given most and never used,
+    and the turns in which the agent searched the memory itself."""
+    usage = sessions.get("usage") or {}
+    if sessions.get("skipped") or sessions.get("error") or not usage:
+        return {"skipped": sessions.get("skipped") or sessions.get("error") or "沒有本週的注入數字"}
+    per_record = usage.get("per_record") or {}
+    by_node: dict[str, dict[str, Any]] = {}
+    for record_id, (injected, explicit, content) in sorted(per_record.items()):
+        entry = by_node.setdefault(node_of(record_id), {"injected": 0, "explicit": 0, "content": 0})
+        entry["injected"] += injected
+        entry["explicit"] += explicit
+        entry["content"] += content
+    for entry in by_node.values():
+        entry["rate"] = round((entry["explicit"] + entry["content"]) / entry["injected"], 3) if entry["injected"] else None
+    never = sorted(((record_id, counts[0]) for record_id, counts in per_record.items() if not counts[1] and not counts[2]),
+                   key=lambda item: (-item[1], item[0]))[:10]
+    injected = int(usage.get("injected") or 0)
 
+    def share(part: int) -> float | None:
+        return round(part / injected, 3) if injected else None
 
-def _search_calls(raw_line: str, cutoff: datetime) -> int:
-    """`memoryctl search` runs in one assistant line (spec 8.16 (c)): Bash
-    tool calls only, recent, and not from a session working in the memory
-    repo itself, where the command is development, not recall."""
-    try:
-        entry = json.loads(raw_line)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(entry, dict):
-        return 0
-    cwd = str(entry.get("cwd") or "")
-    if cwd == str(_MEMORY_REPO) or cwd.startswith(str(_MEMORY_REPO) + os.sep):
-        return 0
-    moment = _parse_time(str(entry.get("timestamp") or ""))
-    if moment is not None and moment < cutoff:
-        return 0
-    content = (entry.get("message") or {}).get("content")
-    if not isinstance(content, list):
-        return 0
-    return sum(
-        1
-        for item in content
-        if isinstance(item, dict) and item.get("type") == "tool_use" and item.get("name") == "Bash"
-        and _SEARCH_COMMAND_RE.search(str((item.get("input") or {}).get("command") or ""))
-    )
-
-
-def citation_signal(
-    projects_dir: Path, now: datetime, days: int = 7, node_of: Callable[[str], str] | None = None
-) -> dict[str, Any]:
-    """Share of injected records later named in the same session's own work.
-
-    Streams each transcript line by line through rating's prefiltered reader;
-    assistant lines are searched as raw text, never parsed. With `node_of`,
-    the pairs are also counted per routing node.
-    """
-    cutoff = now - timedelta(days=days)
-    search_calls = 0
-    injected_pairs: set[tuple[str, str]] = set()
-    cited_pairs: set[tuple[str, str]] = set()
-    counts: dict[str, int] = {}
-    cited_ids: set[str] = set()
-    for path in projects_dir.glob("**/*.jsonl"):
-        try:
-            if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
-                continue
-        except OSError:
-            continue
-        session = path.stem
-        pending: set[str] = set()
-        in_recent_human_turn = False
-        for kind, payload in rating.iter_transcript_events(path):
-            if kind == "human":
-                entry, _ = payload
-                moment = rating._parse_time(str(entry.get("timestamp") or ""))
-                in_recent_human_turn = moment is not None and moment >= cutoff
-                session = str(entry.get("sessionId") or session)
-            elif kind == "prompt":
-                in_recent_human_turn = False
-            elif kind == "injection" and in_recent_human_turn:
-                for record in rating.parse_injection(payload):
-                    pair = (session, record["id"])
-                    if pair not in injected_pairs:
-                        injected_pairs.add(pair)
-                        counts[record["id"]] = counts.get(record["id"], 0) + 1
-                    if pair not in cited_pairs:
-                        pending.add(record["id"])
-            elif kind == "assistant" and "memoryctl search" in payload:
-                search_calls += _search_calls(payload, cutoff)
-            if kind == "assistant" and pending:
-                for record_id in [rid for rid in pending if rid in payload]:
-                    cited_pairs.add((session, record_id))
-                    cited_ids.add(record_id)
-                    pending.discard(record_id)
-    total = len(injected_pairs)
-    never = sorted(((rid, n) for rid, n in counts.items() if rid not in cited_ids), key=lambda x: (-x[1], x[0]))[:10]
-    signal = {
-        "search_calls": search_calls,
-        "injected_pairs": total,
-        "cited_pairs": len(cited_pairs),
-        "rate": round(len(cited_pairs) / total, 3) if total else None,
-        "never_cited_top": [{"id": rid, "injections": n} for rid, n in never],
+    search = sessions.get("search") or {}
+    apart = sessions.get("usage_memory_repo") or {}
+    return {
+        "injected": injected, "explicit": int(usage.get("explicit") or 0), "content": int(usage.get("content") or 0),
+        # Turns in the memory system's own folders, left out of the numbers above (A1 ruling).
+        "memory_repo": {key: int(apart.get(key) or 0) for key in ("injected", "explicit", "content")},
+        "rate": usage.get("rate"), "explicit_rate": share(int(usage.get("explicit") or 0)),
+        "content_rate": share(int(usage.get("content") or 0)), "detector": usage.get("detector"),
+        "by_node": dict(sorted(by_node.items())),
+        "never_used_top": [{"id": record_id, "injections": n} for record_id, n in never],
+        "search_calls": int(search.get("calls") or 0),
+        "search_after": dict(search.get("after") or {}),
     }
-    if node_of is not None:
-        by_node: dict[str, dict[str, Any]] = {}
-        for pairs, key in ((injected_pairs, "injected"), (cited_pairs, "cited")):
-            for _, record_id in pairs:
-                entry = by_node.setdefault(node_of(record_id), {"injected": 0, "cited": 0})
-                entry[key] += 1
-        for entry in by_node.values():
-            entry["rate"] = round(entry["cited"] / entry["injected"], 3) if entry["injected"] else None
-        signal["by_node"] = dict(sorted(by_node.items()))
-    return signal
 
 
 def failure_layer_signal(config_root: Path, now: datetime, days: int = 7) -> dict[str, Any]:
@@ -730,13 +825,298 @@ def _created_within(metadata: dict[str, Any], now: datetime, days: int) -> bool:
 # CI pair (0.04) below 2,400 others: its two records share the fix and the
 # moment to apply it, not the story.
 CROSS_PROJECT_SIMILARITY = 0.07
+# Two records of one place this alike may be one written twice; listed
+# with no draft, a supersede into one being the usual fix (designer 2026-10-27).
+SAME_PLACE_SIMILARITY = 0.3
+SAME_PLACE_LIST_LIMIT = 10
 CROSS_PROJECT_SECTIONS = {
     "failure": ("Root Cause", "Symptom", "Verified Fix", "Retry When"),
     "experience": ("Situation", "Expectation", "Observed Outcome", "Applicability"),
 }
 
 
-def cross_project_candidates(root: Path, local_machine: str | None = None) -> dict[str, Any]:
+# The weekly embedding step (spec 論文借鏡改善 B1). It runs as a child process
+# under the interpreter that has the semantic extra, inside the doctor's own
+# memory cap; without it, or without the model, the report says so and goes on.
+SEMANTIC_PYTHON_ENV = "AGENT_MEMORY_SEMANTIC_PYTHON"
+SEMANTIC_PYTHON = Path.home() / ".local" / "share" / "agent-memory" / "semantic-venv" / "bin" / "python"
+# The child peaked at 524 MB on the live ledger (299 records, 1196 sections).
+SEMANTIC_MEMORY_FLOOR_MB = 1200
+SEMANTIC_TIMEOUT = 900
+# On the live ledger the pairs word overlap finds sit at 0.71 to 0.91 and its
+# noise pairs at 0.46 to 0.57; above 0.75 the model adds about ten a week.
+SEMANTIC_PAIR_THRESHOLD = 0.75
+SEMANTIC_PAIR_LIMIT = 10
+TOPIC_CLUSTER_THRESHOLD = 0.6
+TOPIC_MIN_SIZE = 2
+TOPIC_WORD_LIMIT = 5
+TOPIC_LIST_LIMIT = 5
+_SKIPPED_SECTIONS = frozenset({"evidence", "decision links"})
+
+
+def _main_sections(body: str) -> list[str]:
+    """A record's sections, without Evidence and Decision Links."""
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    for line in body.splitlines():
+        heading = re.fullmatch(r"##\s+(.+?)\s*", line.strip())
+        if heading:
+            current = None if heading.group(1).casefold() in _SKIPPED_SECTIONS else []
+            if current is not None:
+                sections.append(current)
+        elif current is not None:
+            current.append(line)
+    return [text for text in ("\n".join(lines).strip() for lines in sections) if text]
+
+
+def _trigger_in(word: str, text: str) -> bool:
+    """Whether a topic trigger would open on this text, by the router's rule:
+    CJK or spaced words as substrings, an underscored name when every part
+    is a term, any other word only as a whole term."""
+    from .router import _CJK_RE
+
+    word = word.casefold()
+    if _CJK_RE.search(word) or " " in word:
+        return word in text.casefold()
+    terms = _terms(text)
+    if "_" in word:
+        parts = [part for part in word.split("_") if part]
+        return bool(parts) and all(part in terms for part in parts)
+    return word in terms
+
+
+def topic_candidates(
+    root: Path, routing: dict[str, Any], settings: dict[str, Any], frequency: "Counter[str] | None" = None,
+) -> dict[str, dict[str, Any]]:
+    """Knowledge records no topic word reaches: in knowledge/misc, or in a
+    topic whose name and words never appear in the record's own text. Fills
+    `frequency` with how many active records hold each term."""
+    from .core import decode_record
+    from .lexical_index import node_for
+
+    words = {str(item["name"]).casefold(): [str(w).casefold() for w in item["words"]] for item in settings["topics"]}
+    found = {}
+    for path in sorted((root / "records").glob("*/*.md")):
+        try:
+            metadata, body = decode_record(path)
+        except Exception:
+            continue
+        if metadata.get("status") != "active":
+            continue
+        if frequency is not None:
+            frequency.update(_terms(body))
+        node = node_for(metadata, routing)
+        if not node.startswith("knowledge/"):
+            continue
+        topic = node[len("knowledge/"):]
+        if topic != "misc" and any(_trigger_in(trigger, body) for trigger in {topic, *words.get(topic, [])}):
+            continue
+        found[str(metadata["id"])] = {"topic": topic, "sections": _main_sections(body)}
+    return found
+
+
+def semantic_python() -> Path:
+    value = os.environ.get(SEMANTIC_PYTHON_ENV)
+    return Path(value).expanduser() if value else SEMANTIC_PYTHON
+
+
+def semantic_unavailable(root: Path) -> str | None:
+    """Why the embedding step cannot run now, or None."""
+    from .semantic import _model_manifest
+
+    python = semantic_python()
+    if not os.access(python, os.X_OK):
+        return f"沒有向量環境（{python}）"
+    if not _model_manifest(root).is_file():
+        return "沒有本機模型（memoryctl semantic setup）"
+    available = _available_mb()
+    if available is not None and available < SEMANTIC_MEMORY_FLOOR_MB:
+        return f"可用記憶體 {available} MB < {SEMANTIC_MEMORY_FLOOR_MB}"
+    return None
+
+
+def semantic_similarities(root: Path, texts: dict[str, list[str]], floor: float) -> dict[str, Any]:
+    """Cosine of every pair of records at or above `floor`, from the child
+    process, or why there is none. Never raises."""
+    reason = semantic_unavailable(root)
+    if reason:
+        return {"skipped": reason}
+    python = semantic_python()
+    code = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(code), "HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"}
+    try:
+        done = subprocess.run(
+            [str(python), "-m", "agent_memory.semantic_doctor"], cwd=code, env=env, text=True,
+            input=json.dumps({"root": str(root), "texts": texts, "floor": floor}, ensure_ascii=False),
+            capture_output=True, timeout=SEMANTIC_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"error": str(exc)[:300]}
+    if done.returncode != 0:
+        lines = done.stderr.strip().splitlines()
+        return {"error": (lines[-1] if lines else f"exit {done.returncode}")[:300]}
+    try:
+        output = json.loads(done.stdout)
+        if output.get("skipped"):
+            return {"skipped": str(output["skipped"])}
+        pairs = {frozenset((str(a), str(b))): float(c) for a, b, c in output["pairs"] if a != b}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {"error": "向量子行程的輸出讀不懂"}
+    return {"pairs": pairs, "records": int(output.get("count", 0) or 0),
+            "seconds": output.get("seconds"), "peak_mb": round(int(output.get("peak_rss_kb", 0) or 0) / 1024, 1)}
+
+
+def semantic_signal(root: Path) -> dict[str, Any]:
+    """One embedding run for both uses: pairs the word overlap misses, and
+    clusters of records no topic word reaches."""
+    from .core import _extract_section
+    from .lexical_index import compute_routing
+    from .storage import load_router_settings
+
+    reason = semantic_unavailable(root)
+    if reason:
+        return {"skipped": reason}
+    routing = compute_routing()
+    try:
+        settings = load_router_settings()
+    except Exception:
+        from .storage import router_defaults
+
+        settings = router_defaults()
+    texts = {}
+    for kind, sections in CROSS_PROJECT_SECTIONS.items():
+        for metadata, body in _records(root, kind):
+            texts[str(metadata["id"])] = [text for section in sections if (text := _extract_section(body, section))]
+    frequency: Counter[str] = Counter()
+    candidates = topic_candidates(root, routing, settings, frequency)
+    for record_id, item in candidates.items():
+        texts.setdefault(record_id, item["sections"])
+    result = semantic_similarities(root, texts, min(SEMANTIC_PAIR_THRESHOLD, TOPIC_CLUSTER_THRESHOLD))
+    if "pairs" in result:
+        result["topics"] = topic_suggestions(candidates, result["pairs"], texts, routing, settings, frequency)
+    result["topic_candidates"] = len(candidates)
+    return result
+
+
+_GENERIC_WORDS = frozenset({"need", "needs", "single", "command", "using", "used", "make", "made", "any", "every",
+                            "still", "same", "other", "least", "most", "each", "both", "case", "cases", "thing"})
+# Everyday English and the words every software record uses: none names a
+# topic, so none is offered as a trigger word (spec 實際使用回饋改善 F15).
+_COMMON_ENGLISH = frozenset("""
+able about above across action actions active actual added adding after again against allow allowed almost along
+already also always among amount another answer anything apply area around asked available back based basic because
+become before begin behind being below best better between bring build built call called came cannot care cause
+certain change changed changes check checked checks choose clear close code come common complete content context
+control copy correct cost could count course create created current data date days default define detail details
+different direct does done down during early easy effect either else enough entry error errors even event events
+ever example exist expected explain extra fact facts fail failed false fast field fields final find first fixed
+follow following form found free from full function future general give given goal going good great group half
+hand handle happen hard have help here high hold however idea important include including info information inside
+instead into issue issues item items itself just keep kind know known large last later left less level like likely
+limit line lines list little local long look lots main many mean means might missing mode more move much must name
+names near never next none normal note nothing number numbers object often once only open option options order
+others output over page part parts pass past path place plan point possible present problem problems process quite
+rather read real reason recall record records reference rest result results return right rule rules running runtime
+save seen send setting settings should show side simple since size small some something soon source space start
+state step steps stop such support sure system take taken task tell term test tested tests text than that their
+them then there these they things think this those though through time times today together total true turn type
+types under until update useful user users value values variable version very view want well were what when where
+whether which while whole will with within without word words work working works would write wrong year
+""".split())
+# A trigger word is held by at most this many records per cluster member.
+TOPIC_WORD_SPREAD = 5
+# What the doctor's own list held besides router.toml's default function
+# characters: a Chinese bigram with one is never a trigger word (之後, 還要,
+# 離之 came back without them; retrieval re-check R4). router.toml is not
+# changed.
+TOPIC_EXTRA_FUNCTION_CHARS = frozenset("個要會有不從到其之以為所再還才但更")
+
+
+def _word_tail(term: str, ledger: str, function_chars: set[str]) -> bool:
+    """A Chinese bigram that is the end of a longer word, across the whole
+    ledger: it never starts a run of Chinese (no punctuation, space, letter
+    or function character before it anywhere), and four in five times the
+    same character comes before it (割區 in 分割區, 分後 in 出分後). A word
+    that mostly follows another word in its members' text is still a word:
+    系統 after 記憶, 容器 before 化 (retrieval review)."""
+    before: Counter[str] = Counter()
+    for match in re.finditer(re.escape(term), ledger):
+        char = ledger[match.start() - 1] if match.start() else ""
+        if not re.fullmatch(r"[\u3400-\u9fff]", char) or char in function_chars:
+            return False  # it stands alone somewhere
+        before[char] += 1
+    if sum(before.values()) < 2:
+        return False
+    return before.most_common(1)[0][1] * 5 >= sum(before.values()) * 4
+
+
+def topic_suggestions(
+    candidates: dict[str, dict[str, Any]], pairs: dict[frozenset[str], float], texts: dict[str, list[str]],
+    routing: dict[str, Any], settings: dict[str, Any], frequency: "Counter[str] | None" = None,
+) -> list[dict[str, Any]]:
+    """A topic and trigger words for each cluster of candidates (every two
+    members alike), as suggestions for router.toml. The topic is the one the
+    members already sit in when they share one, whose words then miss them;
+    the words are terms at least two members hold, rarest in the ledger
+    first."""
+    from .lexical_index import _token_owner
+    from .merge_drafts import groups
+
+    ids = set(candidates)
+    clusters = [g for g in groups([{"ids": sorted(key), "named": False, "overlap": value}
+                                   for key, value in pairs.items() if key <= ids and value >= TOPIC_CLUSTER_THRESHOLD])
+                if len(g) >= TOPIC_MIN_SIZE]
+    configured = {str(item["name"]).casefold(): [str(w).casefold() for w in item["words"]] for item in settings["topics"]}
+    taken = set(configured) | {w for group in configured.values() for w in group} | set(_token_owner(routing))
+    terms = {record_id: _terms(" ".join(sections)) for record_id, sections in texts.items()}
+    if not frequency:
+        frequency = Counter(term for found in terms.values() for term in found)
+    projects = set(_token_owner(routing))
+    # router.toml's function characters (retrieval review), and the
+    # doctor's own on top: routing counts 之後 or 還要 as words, but a
+    # trigger word holding one is no word (retrieval re-check R4).
+    from .storage import ROUTER_DEFAULT_FUNCTION_CHARS
+
+    function_chars = set(str((settings.get("relevance") or {}).get("function_chars") or ROUTER_DEFAULT_FUNCTION_CHARS))
+    function_chars |= TOPIC_EXTRA_FUNCTION_CHARS
+    ledger = "\n".join(text for values in texts.values() for text in values)
+
+    def first(counter: Counter[str]) -> str | None:
+        return min(counter.items(), key=lambda item: (-item[1], item[0]))[0] if counter else None
+
+    def fragment(term: str, members: list[str]) -> bool:
+        """Hashes, versions, device names, function-word bigrams, plain words,
+        everyday English, and the tail of a longer Chinese word."""
+        if term in _GENERIC_WORDS or term in _COMMON_ENGLISH or (term.isascii() and len(term) < 3):
+            return True
+        if sum(char.isdigit() for char in term) >= 2 or re.fullmatch(r"[\d.]+", term):
+            return True
+        if not term.isascii() and len(term) < 2:
+            return True
+        return not term.isascii() and (any(char in function_chars for char in term)
+                                       or _word_tail(term, ledger, function_chars))
+
+    suggestions = []
+    for cluster in clusters:
+        name = (first(Counter(candidates[i]["topic"] for i in cluster if candidates[i]["topic"] != "misc"))
+                or first(Counter(parts[1] for i in cluster if len(parts := i.split(".")) > 2 and parts[1] not in projects))
+                or "new_topic")
+        counts = Counter(term for i in cluster for term in terms.get(i, set()))
+        words = sorted(
+            (t for t, n in counts.items() if n >= 2 and t not in taken and t != name and not fragment(t, cluster)
+             and frequency.get(t, 0) <= TOPIC_WORD_SPREAD * len(cluster)),
+            key=lambda t: (-counts[t] / max(frequency.get(t, 0), counts[t]), -counts[t], t),
+        )[:TOPIC_WORD_LIMIT]
+        status = ("configured" if name in configured
+                  else "unworded" if name in {c["topic"] for c in candidates.values()} else "new")
+        suggestions.append({"name": name, "status": status, "words": words, "members": cluster})
+    return sorted(suggestions, key=lambda s: (-len(s["members"]), s["name"]))
+
+
+def cross_project_candidates(
+    root: Path, local_machine: str | None = None, semantic: dict[frozenset[str], float] | None = None,
+    transcripts: tuple[Path, Path] | None = None,
+) -> dict[str, Any]:
     """Lessons that may be one lesson learned in more than one place (spec
     學到的地方與適用範圍 v1, section 5). Information only, never a WARN.
 
@@ -745,10 +1125,25 @@ def cross_project_candidates(root: Path, local_machine: str | None = None) -> di
     of different origin pair up when one names the other's id, or when the
     Jaccard similarity of their words reaches CROSS_PROJECT_SIMILARITY. A
     shared machine is not a shared origin: sessions of several projects
-    wrote the records bound to one machine.
+    wrote the records bound to one machine; nor is global. A record that
+    names no project gets the projects of the folder its first version was
+    written in (`transcripts`, as the drafts do), or that folder itself as
+    folder:<path>; one whose session left no transcript is nowhere known
+    and pairs with any (four global shell lessons learned in two projects
+    were never paired: designer 2026-10-27). Two records of one
+    place alike at SAME_PLACE_SIMILARITY are listed apart as maybe written
+    twice (`same_place`). A record already folded into a
+    general lesson (論文借鏡改善 A4) stands for it: its pairs go to the
+    general one (`via` names it), and it is never paired with the general
+    one or with another record folded into the same one. A record naming a
+    general lesson the ledger does not hold is an ordinary record. With the
+    embedding step's cosines, a pair the words miss joins at
+    SEMANTIC_PAIR_THRESHOLD, the SEMANTIC_PAIR_LIMIT strongest only.
     """
+    from . import merge_drafts
     from .core import _extract_section
     from .lexical_index import compute_routing, record_origins
+    from .merge_drafts import merged_into
 
     routing = compute_routing()
     items = []
@@ -760,29 +1155,63 @@ def cross_project_candidates(root: Path, local_machine: str | None = None) -> di
                 "scope": str(metadata.get("scope", "")),
                 "created": str(metadata.get("created_at") or "")[:10],
                 "terms": _terms(" ".join(_extract_section(body, section) for section in sections)),
+                "merged": merged_into(metadata, body),
             })
-    pairs = []
+    by_id = {item["id"]: item for item in items}
+    unplaced = [item["id"] for item in items if not any(o.startswith("project:") for o in item["origins"])]
+    learned = merge_drafts.learned_places(root, unplaced, transcripts) if transcripts else {}
+    for item in items:
+        if item["merged"] not in by_id:
+            item["merged"] = None
+        place = learned.get(item["id"])
+        item["inferred"] = ([f"project:{project}" for project in place["projects"]] or [f"folder:{place['folder']}"]
+                            if place else [])
+        item["places"] = {o for o in item["origins"] if not o.startswith("machine:") and o != "global"} | set(item["inferred"])
+    same_place = []
+    best: dict[frozenset[str], dict[str, Any]] = {}
     for index, first in enumerate(items):
         for second in items[index + 1:]:
-            places = [{o for o in item["origins"] if not o.startswith("machine:")} for item in (first, second)]
-            if places[0] & places[1]:
+            ends = [by_id[item["merged"]] if item["merged"] else item for item in (first, second)]
+            if ends[0]["id"] == ends[1]["id"]:
+                continue
+            union = first["terms"] | second["terms"]
+            score = round(len(first["terms"] & second["terms"]) / len(union), 3) if union else 0.0
+            # Learned in one place: no lesson of two places, but maybe one
+            # written twice, listed apart with no draft (designer 2026-10-27).
+            if shared := first["places"] & second["places"]:
+                if score >= SAME_PLACE_SIMILARITY:
+                    same_place.append({"ids": [first["id"], second["id"]], "overlap": score, "places": sorted(shared)})
                 continue
             named = second["id"] in first["body"] or first["id"] in second["body"]
-            union = first["terms"] | second["terms"]
-            score = len(first["terms"] & second["terms"]) / len(union) if union else 0.0
-            if named or score >= CROSS_PROJECT_SIMILARITY:
-                pairs.append({
-                    "ids": [first["id"], second["id"]],
-                    "origins": [first["origins"], second["origins"]],
-                    "named": named, "overlap": round(score, 3),
-                })
+            cosine = (semantic or {}).get(frozenset((first["id"], second["id"])))
+            if not (named or score >= CROSS_PROJECT_SIMILARITY or (cosine is not None and cosine >= SEMANTIC_PAIR_THRESHOLD)):
+                continue
+            pair = {"ids": [ends[0]["id"], ends[1]["id"]], "origins": [ends[0]["origins"], ends[1]["origins"]],
+                    "named": named, "overlap": score}
+            if ends[0]["inferred"] or ends[1]["inferred"]:
+                pair["inferred"] = [ends[0]["inferred"], ends[1]["inferred"]]
+            if cosine is not None:
+                pair["semantic"] = cosine
+            if via := [item["id"] for item in (first, second) if item["merged"]]:
+                pair["via"] = via
+            known = best.get(frozenset(pair["ids"]))
+            if known is None or (named, score, cosine or 0.0) > (known["named"], known["overlap"], known.get("semantic", 0.0)):
+                best[frozenset(pair["ids"])] = pair
+    by_words = [pair for pair in best.values() if pair["named"] or pair["overlap"] >= CROSS_PROJECT_SIMILARITY]
+    by_meaning = sorted((pair for pair in best.values() if pair not in by_words),
+                        key=lambda pair: (-pair["semantic"], pair["ids"]))
+    pairs = by_words + by_meaning[:SEMANTIC_PAIR_LIMIT]
     pairs.sort(key=lambda pair: (not pair["named"], -pair["overlap"], pair["ids"]))
     other_machine = [
         {"id": item["id"], "machine": item["scope"][len("machine:"):], "created": item["created"]}
         for item in items
         if item["scope"].startswith("machine:") and item["scope"] != f"machine:{local_machine}"
     ]
-    return {"pairs": pairs, "other_machine": other_machine, "threshold": CROSS_PROJECT_SIMILARITY}
+    merged = {item["id"]: item["merged"] for item in items if item["merged"]}
+    same_place.sort(key=lambda pair: (-pair["overlap"], pair["ids"]))
+    return {"pairs": pairs, "other_machine": other_machine, "threshold": CROSS_PROJECT_SIMILARITY, "merged": merged,
+            "semantic_only": {"added": min(len(by_meaning), SEMANTIC_PAIR_LIMIT), "left_out": max(0, len(by_meaning) - SEMANTIC_PAIR_LIMIT)},
+            "same_place": same_place, "same_place_threshold": SAME_PLACE_SIMILARITY}
 
 
 def repeat_signals(root: Path, config_root: Path, now: datetime) -> dict[str, Any]:
@@ -915,7 +1344,11 @@ def build_report(
         check_preferences(root, previous_checks.get("preferences")),
         check_capsules(root, now, projects_dir),
         check_sources(config_root),
+        check_speed_bump_failures(root, config_root),
+        check_generated(root, config_root),
+        check_due_tasks(root),
         run_golden(root, config_root),
+        run_probes(root, config_root),
         check_audit(root),
         check_tests(root, run_tests),
     ]
@@ -924,14 +1357,6 @@ def build_report(
     transcripts_ok = available is not None and available >= TRANSCRIPT_MEMORY_FLOOR_MB
     this_week = summary["weeks"][0]
     rated_this_week = (rating.ratings_dir(config_root) / f"{rating.iso_week(now)}.json").exists()
-    skipped = {"search_calls": 0, "injected_pairs": 0, "cited_pairs": 0, "rate": None, "never_cited_top": []}
-    if not transcripts_ok:
-        citation = {**skipped, "skipped": f"可用記憶體 {available} MB < {TRANSCRIPT_MEMORY_FLOOR_MB}"}
-    else:
-        try:
-            citation = citation_signal(projects_dir, now, node_of=record_nodes(root))
-        except MemoryError:
-            citation = {**skipped, "skipped": "讀對話紀錄時碰到記憶體上限"}
     repeats = repeat_signals(root, config_root, now)
     previous_cumulative = ((last_week or {}).get("signals", {}).get("repeats", {}) or {}).get("new_observations")
     repeats["new_observations_this_week"] = (
@@ -947,27 +1372,134 @@ def build_report(
         local_machine = json.loads((config_root / "machine.json").read_text(encoding="utf-8")).get("machine_id")
     except (OSError, ValueError, AttributeError):
         local_machine = None
-    cross_project = cross_project_candidates(root, local_machine)
+    # Pairs the words miss and topic suggestions, from the local model (B1).
+    try:
+        semantic = semantic_signal(root)
+    except Exception as exc:  # the embedding step never stops the report
+        semantic = {"error": str(exc)[:300]}
+    # Where each record was learned: transcripts changed since last week are
+    # read again for the writes they report (spec 論文借鏡改善 A2). Codex
+    # transcripts are read only with the default Claude folder, so a run on
+    # another folder (a test) never reads this machine's sessions.
+    learned_in: dict[str, Any] = {"skipped": "可用記憶體不足"} if not transcripts_ok else {}
+    from . import learned
+
+    codex = learned.default_codex_dir() if projects_dir == rating.default_projects_dir() else projects_dir / ".no-codex"
+    if transcripts_ok:
+        try:
+            learned_in = learned.backfill(root, projects_dir, codex, now=now)
+        except Exception as exc:  # a broken cache or transcript never stops the report
+            learned_in = {"error": str(exc)}
+    # What the hooks injected over whole sessions this week, as the
+    # transcripts recorded it: numbers and record ids only (spec 實際使用回饋改善 F16).
+    if transcripts_ok:
+        try:
+            from . import replay as replay_module
+            from .pretool import cwd_projects
+
+            # With the default folder, each account profile's folder too.
+            claude = replay_module.default_claude_dirs() if projects_dir == rating.default_projects_dir() else projects_dir
+            week_files = list(replay_module.transcript_files(claude, codex, now))
+            sessions = replay_module.measure_actual(week_files, root, lambda cwd: cwd_projects(cwd, root),
+                                                    replay_module.Window(now - timedelta(days=7)))
+            sessions["missing"] = replay_module.missing_folders(claude, codex)
+        except Exception as exc:  # never stops the report
+            sessions = {"error": str(exc)[:300]}
+            week_files = None
+        # Moments a lesson was likely learned, and whether memory followed
+        # (spec 騰訊借鏡改善 T1): counts, session ids and times only.
+        try:
+            from . import missed as missed_module
+
+            missed = (missed_module.measure(week_files, root, lambda cwd: cwd_projects(cwd, root),
+                                            replay_module.Window(now - timedelta(days=7)), config_root)
+                      if week_files is not None else {"error": "對話紀錄讀不到"})
+        except Exception as exc:  # never stops the report
+            missed = {"error": str(exc)[:300]}
+    else:
+        sessions = {"skipped": f"可用記憶體 {available} MB < {TRANSCRIPT_MEMORY_FLOOR_MB}"}
+        missed = {"skipped": f"可用記憶體 {available} MB < {TRANSCRIPT_MEMORY_FLOOR_MB}"}
+    sessions["live_versions"] = live_versions(root, now)
+    # Whether the agent used what it was given, judged from what it wrote
+    # (spec 實際使用回饋改善 F12); it was the share of records it cited.
+    usage = usage_signal(sessions, record_nodes(root))
+    # Lessons that may be one learned in several places, and drafts for
+    # merging each group into one general lesson; never applied (A4). After
+    # the backfill, so a record's origin can come from the session it was
+    # learned in.
+    from . import merge_drafts
+
+    try:
+        cross_project = cross_project_candidates(root, local_machine, semantic.get("pairs"),
+                                                 (projects_dir, codex) if transcripts_ok else None)
+    except Exception as exc:  # a transcript that cannot be read never stops the report
+        cross_project = {**cross_project_candidates(root, local_machine, semantic.get("pairs")), "inferred_error": str(exc)[:300]}
+    cross_project["semantic"] = {key: value for key, value in semantic.items() if key != "pairs"}
+    try:
+        cross_project["drafts"] = merge_drafts.write_drafts(
+            root, cross_project["pairs"], report_dir, now.date().isoformat(), config_root,
+            (projects_dir, codex) if transcripts_ok else None,
+        )
+    except Exception as exc:
+        cross_project["drafts"] = {"dir": "", "groups": [], "dismissed": 0, "error": str(exc)}
+    # Records that only point at a federated source are no longer injected
+    # and get supersede skeletons (spec 實際使用回饋改善 F5).
+    try:
+        pointer_only = merge_drafts.pointer_drafts(root, report_dir, now.date().isoformat())
+    except Exception as exc:
+        pointer_only = {"dir": "", "records": [], "error": str(exc)}
+    # The ranking feedback is rebuilt from the ratings and this week's
+    # per-record use plus the last weeks' reports (A1, F12).
+    from . import feedback as feedback_module
+
+    per_record = ((sessions.get("usage") or {}).get("per_record") or {}) if not usage.get("skipped") else None
+    week_use = ({record_id: {"injected": counts[0], "explicit": counts[1], "content": counts[2]}
+                 for record_id, counts in per_record.items()} if per_record is not None else None)
+    try:
+        feedback_module.rebuild(config_root, now, report_dir, week_use, projects_dir, root)
+    except Exception:
+        pass
+    harmful = {"records": feedback_module.flagged_harmful(config_root),
+               "unattributed": feedback_module.unattributed(config_root), "pointer_only": pointer_only}
     failure_layer = failure_layer_signal(config_root, now)
-    failure_layer["cited"] = sum(
-        int(item.get("cited", 0))
-        for node, item in (citation.get("by_node") or {}).items()
+    failure_layer["used"] = sum(
+        int(item.get("explicit", 0)) + int(item.get("content", 0))
+        for node, item in (usage.get("by_node") or {}).items()
         if node == "failures" or node.endswith("/failures")
     )
-    checks.append(check_peak_memory())
+    checks.append(check_peak_memory(semantic.get("peak_mb")))
     scoreboard = {
         "useful_rate": this_week["useful_rate"],
         "harmful_rate": this_week["harmful_rate"],
-        "citation_rate": citation["rate"],
+        "usage_rate": usage.get("rate"),
         "repeated_mistakes": repeats["repeated_mistakes"],
     }
+    # Commit notes are kept a year (T6).
+    try:
+        from .commits import prune as prune_commits
+
+        prune_commits(config_root, now)
+    except Exception:
+        pass
+    # Ledger decisions a project has since recorded itself (F8), from reindex.
+    from .lexical_index import read_newer_decisions
+
+    newer_decisions = read_newer_decisions(root)
+    try:
+        from .replay import wide_scope_records
+
+        wide_scope = wide_scope_records(root)
+    except Exception:  # never stops the report
+        wide_scope = []
     report = {
         "date": now.date().isoformat(),
         "rated_this_week": rated_this_week,
         "scoreboard": scoreboard,
         "checks": checks,
-        "signals": {"citation": citation, "repeats": repeats, "recovery": recovery, "failure_layer": failure_layer,
-                    "cross_project": cross_project},
+        "signals": {"usage": usage, "repeats": repeats, "recovery": recovery, "failure_layer": failure_layer,
+                    "cross_project": cross_project, "learned_in": learned_in, "harmful": harmful,
+                    "sessions": sessions, "newer_decisions": newer_decisions, "missed": missed,
+                    "wide_scope": wide_scope},
     }
 
     def past(key: str, which: dict[str, Any] | None) -> Any:
@@ -981,7 +1513,7 @@ def build_report(
               "| 指標 | 本週 | 上週 | 四週前 |", "|---|---|---|---|"]
     for key, label, percent in (
         ("useful_rate", "有用率", True), ("harmful_rate", "礙事率", True),
-        ("citation_rate", "引用率", True), ("repeated_mistakes", "重複犯錯次數", False),
+        ("usage_rate", "使用率", True), ("repeated_mistakes", "重複犯錯次數", False),
     ):
         lines.append(f"| {label} | {_fmt(scoreboard[key], percent)} | {_fmt(past(key, last_week), percent)} | {_fmt(past(key, four_weeks), percent)} |")
     warns = sum(c["status"] == "WARN" for c in checks)
@@ -993,6 +1525,11 @@ def build_report(
             for item in check["value"]:
                 if not item.get("ok"):
                     lines.append(f"   - 未通過：{item['text'][:40]}（{item.get('why', '')}）")
+        if check["id"] == "probes":
+            for item in check["value"]:
+                if not item.get("ok"):
+                    lines.append(f"   - 未通過：{Path(item.get('cwd', '')).name or '~'}「{item['text'][:40]}」（{item.get('why', '')}）"
+                                 + (f"；理由：{item['reason']}" if item.get("reason") else ""))
         if check["id"] == "capsules":
             for item in check["value"]["stale_active"]:
                 lines.append(f"   - 久未更新：{item['folder']}（{item['days']} 天）")
@@ -1003,53 +1540,274 @@ def build_report(
             for item in check["value"].get("legacy", []):
                 lines.append(f"   - 舊版位置（可移除，資訊）：{item}")
     lines += ["", "## 二、效果訊號", ""]
-    lines.append(f"- 引用率：{citation['cited_pairs']}/{citation['injected_pairs']}（{_fmt(citation['rate'], True)}）"
-                 + (f"（略過：{citation['skipped']}）" if citation.get("skipped") else ""))
-    if citation.get("by_node"):
-        lines.append("- 節點（注入／引用／引用率）：")
-        lines += [f"  - {node}：{item['injected']}／{item['cited']}／{_fmt(item['rate'], True)}"
-                  for node, item in citation["by_node"].items()]
-    if citation["never_cited_top"]:
-        lines.append("- 本週注入最多次但從未被引用：")
-        lines += [f"  - {item['id']}（{item['injections']} 次）" for item in citation["never_cited_top"]]
+    lines += session_lines(sessions, ((last_week or {}).get("signals") or {}).get("sessions"))
+    if usage.get("skipped"):
+        lines.append(f"- 使用率：略過（{usage['skipped']}）")
+    else:
+        lines.append(f"- 使用率（估計值，系統依 AI 寫出的內容判斷，規則 {usage.get('detector') or 'v1'}）：合計 {_fmt(usage['rate'], True)}"
+                     f"（{usage['explicit'] + usage['content']:,}/{usage['injected']:,}）；明寫 id {_fmt(usage['explicit_rate'], True)}"
+                     f"、內容相符 {_fmt(usage['content_rate'], True)}")
+        apart = usage.get("memory_repo") or {}
+        if apart.get("injected"):
+            lines.append(f"  - 不含在記憶系統 repo 裡工作的回合，那些另外列：注入 {apart['injected']:,}、明寫 id {apart['explicit']:,}"
+                         f"、內容相符 {apart['content']:,}")
+        if usage.get("by_node"):
+            lines.append("- 節點（注入／明寫 id／內容相符／使用率）：")
+            lines += [f"  - {node}：{item['injected']}／{item['explicit']}／{item['content']}／{_fmt(item['rate'], True)}"
+                      for node, item in usage["by_node"].items()]
+        if usage.get("never_used_top"):
+            lines.append("- 本週注入最多次但從沒被用到：")
+            lines += [f"  - {item['id']}（{item['injections']} 次）" for item in usage["never_used_top"]]
     lines.append(f"- 重複犯錯：本週分組新增觀測 {repeats['new_observations_this_week']} 筆（自首次記錄起共 {repeats['new_observations']} 筆）；"
                  f"可能重複的 failure {len(repeats['possible_duplicate_failures'])} 筆")
     lines += [f"  - {d['new']} ≈ {d['existing']}（{d['overlap']:.0%}）" for d in repeats["possible_duplicate_failures"]]
     lines.append(f"- 重複交代的偏好：{len(repeats['possible_repeated_preferences'])} 筆")
     lines += [f"  - {d['new']} ≈ {d['existing']}（{d['overlap']:.0%}）" for d in repeats["possible_repeated_preferences"]]
-    lines.append(f"- 失敗層：本週 PreToolUse 注入 {failure_layer['injected']} 次；failures 節點被引用 {failure_layer['cited']} 次")
-    lines.append(f"- memoryctl search 呼叫：本週 {citation.get('search_calls', 0)} 次（不含在 ~/agent-memory 裡工作的 session）")
+    lines.append(f"- 失敗層：本週 PreToolUse 注入 {failure_layer['injected']} 次；failures 節點被用到 {failure_layer['used']} 次")
+    outbound = sessions.get("outbound") if isinstance(sessions, dict) else None
+    if outbound:
+        # F13 ruling 3: every prompt is a turn for now; a high M means the spacing needs another look.
+        lines.append(f"- 送出前提醒 {outbound.get('reminders', 0)} 次，其中同一筆 10 分鐘內重複 {outbound.get('repeats', 0)} 次")
+    lines.append(f"- memoryctl search 呼叫：本週 {usage.get('search_calls', 0)} 次（不含在 ~/agent-memory 裡工作的 session）")
     lines += [f"  - {bump}：擋 {item['denied']}／放行 {item['released']}／改指令 {item['changed']}/{item['released']}"
               for bump, item in failure_layer["speed_bumps"].items()]
     lines.append(f"- 恢復成功率（compact／resume 有 CURRENT TASK）：{recovery['restored']}/{recovery['restored'] + recovery['missed']}（{_fmt(recovery['rate'], True)}）")
     lines += ["", "## 三、可能跨專案的教訓（資訊）", ""]
     lines += cross_project_lines(cross_project)
+    lines += ["", "## 四、被標礙事的記憶（請檢查是否過時）", ""]
+    lines += harmful_lines(harmful)
+    lines += ["", "## 五、可能需要改程式的地方（資訊）", ""]
+    lines += code_change_lines(checks, usage, failure_layer, harmful, cross_project.get("semantic"), newer_decisions,
+                               wide_scope)
+    from .missed import lines as missed_lines
+
+    lines += ["", "## 六、可能漏記的時刻（只量測）", ""]
+    lines += missed_lines(missed)
     return report, "\n".join(lines) + "\n"
 
 
+def live_versions(root: Path, now: datetime, days: int = 7) -> list[dict[str, str]]:
+    """The code versions live ran this week, oldest first: the one in use
+    when the week began ("start"), then each commit on the main line that
+    changed the program, with its local time."""
+    since = (now - timedelta(days=days)).isoformat()
+
+    def log(*limit: str) -> list[dict[str, str]]:
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(root), "log", "--first-parent", *limit, "--date=format-local:%Y-%m-%d %H:%M",
+                 "--format=%h%x09%cd", "--", "agent_memory", "bin"],
+                capture_output=True, text=True, timeout=10, env=git_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if done.returncode != 0:
+            return []
+        return [{"commit": commit, "time": time} for commit, _, time in (line.partition("\t") for line in done.stdout.splitlines()) if commit]
+
+    start = log("-1", f"--until={since}")
+    return [*({**item, "start": "1"} for item in start), *reversed(log(f"--since={since}"))]
+
+
+def session_lines(sessions: dict[str, Any], last: dict[str, Any] | None) -> list[str]:
+    """Section 二's whole-session numbers, beside last week's."""
+    from . import replay as replay_module
+
+    if sessions.get("skipped") or sessions.get("error"):
+        lines = [f"- 每週注入指標：略過（{sessions.get('skipped') or sessions.get('error')}）"]
+    else:
+        lines = ["- 每週注入指標（這週紀錄裡實際的注入；只算數字與紀錄 id）："]
+        lines += ["  " + line for line in replay_module.reading_lines(sessions) + replay_module.summary_lines(sessions, last)]
+    versions = sessions.get("live_versions") or []
+    start = [v for v in versions if v.get("start")]
+    changed = [v for v in versions if not v.get("start")]
+    lines.append("- 這週 live 的程式版本（本機時間）：期間開始時 " + (f"{start[0]['time']} {start[0]['commit']}" if start else "不明")
+                 + "；期間內換過 " + ("、".join(f"{v['time']} {v['commit']}" for v in changed) if changed else "沒有"))
+    return lines
+
+
+def harmful_lines(harmful: dict[str, Any]) -> list[str]:
+    """Records the user rated harmful twice or more, and the ratings that
+    could not be credited to one memory (spec 論文借鏡改善 A1)."""
+    rows = harmful.get("records", [])
+    lines = [f"- {row['id']}：礙事 {row['harmful']} 次，最後一次評分 {row['last_rated'] or '不明'}" for row in rows]
+    if rows:
+        lines.append("- 確認過時就用 memoryctl supersede 更正；排序已經自動降低它的分數，但內容要人來改。")
+    else:
+        lines.append("- 沒有（評分裡被標「礙事」2 次以上、而且歸得到那一筆的記憶）")
+    left = harmful.get("unattributed", {})
+    if left.get("useful") or left.get("harmful"):
+        lines.append(
+            f"- 無法歸到單一記憶的評分：有用 {left.get('useful', 0)} 題、礙事 {left.get('harmful', 0)} 題"
+            "（那題附了多筆記憶，系統判斷 AI 沒有用到其中任何一筆）"
+        )
+    pointers = (harmful.get("pointer_only") or {}).get("records") or []
+    if pointers:
+        folder = harmful["pointer_only"].get("dir")
+        lines.append(f"- 只剩指標、不再注入的紀錄：{len(pointers)} 筆（決定段只寫已移到聯邦來源；search 照樣找得到）"
+                     + (f"；supersede 草稿在 {folder}，照各筆的 README.md 二選一" if folder else ""))
+        lines += [f"  - {item['id']}（{item['scope']}；" + ("、".join(item["adrs"]) or "沒寫 ADR") + "）" for item in pointers]
+    return lines
+
+
+# A speed bump the agent ran again unchanged this often after the hold is
+# probably holding commands it should not (spec 論文借鏡改善 A5).
+LOOSE_BUMP_MIN_DENIED = 3
+LOOSE_BUMP_RATIO = 0.8
+CODE_LIST_LIMIT = 5
+
+
+def code_change_lines(
+    checks: list[dict[str, Any]], usage: dict[str, Any], failure_layer: dict[str, Any], harmful: dict[str, Any],
+    semantic: dict[str, Any] | None = None, newer_decisions: dict[str, list[dict[str, str]]] | None = None,
+    wide_scope: list[dict[str, str]] | None = None,
+) -> list[str]:
+    """Where the program itself may need changing, one line each with what
+    to do about it. Information for the designer, who writes the specs; the
+    doctor never changes code."""
+    lines = []
+    golden = next((check for check in checks if check.get("id") == "golden"), None)
+    rows = [item for item in (golden or {}).get("value") or [] if isinstance(item, dict)]
+    failed = [item for item in rows if not item.get("ok") and not item.get("reference")]
+    reference = [str(item.get("text", ""))[:40] for item in rows if not item.get("ok") and item.get("reference")]
+    if failed:
+        for item in failed[:CODE_LIST_LIMIT]:
+            lines.append(f"- golden 失敗：「{str(item.get('text', ''))[:40]}」（{item.get('why') or '原因不明'}）"
+                         "→ 用 memoryctl context --explain 跑這題，看是門檻、預算還是路由")
+    elif rows:
+        lines.append("- golden：全部通過" + (f"（只供參考的「{'」「'.join(reference)}」沒過）" if reference else ""))
+    else:
+        lines.append("- golden：沒有可跑的題目（doctor/golden.toml）")
+    loose = []
+    for bump, item in (failure_layer.get("speed_bumps") or {}).items():
+        denied = int(item.get("denied", 0) or 0)
+        same = int(item.get("released", 0) or 0) - int(item.get("changed", 0) or 0)
+        if denied >= LOOSE_BUMP_MIN_DENIED and same / denied >= LOOSE_BUMP_RATIO:
+            loose.append(f"- 危險清單可能誤擋：{bump} 擋 {denied} 次，其中 {same} 次照原指令放行"
+                         "→ 考慮收窄 pattern，或移出清單")
+    lines += loose or ["- 危險清單：沒有放行比例偏高的項目"]
+    never = usage.get("never_used_top") or []
+    if never:
+        shown = "、".join(f"{item['id']}（{item['injections']} 次）" for item in never[:CODE_LIST_LIMIT])
+        lines.append(f"- 被注入很多次卻從沒被用到：{shown}→ 檢查是否太常被帶出（門檻、主題詞），或內容需要改寫")
+    search_after = usage.get("search_after") or {}
+    if search_after:
+        shown = "、".join(f"{node} {count} 輪" for node, count in list(search_after.items())[:CODE_LIST_LIMIT])
+        lines.append(f"- 路由可能漏了：AI 自己跑 memoryctl search 的輪次（依那一輪的注入來源）：{shown}"
+                     "→ 看那幾輪問了什麼，補主題詞或節點")
+    else:
+        lines.append("- 路由：本週沒有 AI 自己再去查記憶的輪次")
+    lines += topic_lines(semantic)
+    newer = sorted((newer_decisions or {}).items())
+    for record_id, items in newer[:CODE_LIST_LIMIT]:
+        lines.append(f"- 帳本決策可能過時：{record_id}，專案之後自己記了 "
+                     + "、".join(f"{item['id']}（{item['recorded_on']}）" for item in items)
+                     + "→ 確認後 supersede 成指向專案紀錄（F5 的做法），或退役")
+    if len(newer) > CODE_LIST_LIMIT:
+        lines.append(f"- 另外還有 {len(newer) - CODE_LIST_LIMIT} 筆帳本決策，專案之後自己記了（.cache/newer_decisions.json）")
+    if not newer:
+        lines.append("- 帳本決策：沒有專案之後自己記了的")
+    # Global records whose id names a project: not another project's in the
+    # weekly count, but maybe scoped wider than meant (F16 re-check).
+    by_project: dict[str, list[str]] = {}
+    for item in wide_scope or []:
+        by_project.setdefault(item["project"], []).append(item["id"])
+    for project, ids in sorted(by_project.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        shown = "、".join(ids[:CODE_LIST_LIMIT]) + (f" 等 {len(ids)} 筆" if len(ids) > CODE_LIST_LIMIT else "")
+        lines.append(f"- scope 可能太寬：{project} 有 {len(ids)} 筆是 global，id 卻帶專案名（{shown}）"
+                     f"→ 不算跨專案注入；要不要縮成 project:{project}，由那個專案決定，doctor 不會改")
+    if not by_project:
+        lines.append("- scope：沒有 global 卻帶專案名的紀錄")
+    lines.append(f"- 被標礙事的記憶：{len(harmful.get('records') or [])} 筆（見第四節）")
+    lines.append("- 這一節只列建議；要改的項目由設計者寫成規格，doctor 不會自己改程式。")
+    return lines
+
+
 CROSS_PROJECT_LIST_LIMIT = 20
+
+
+def topic_lines(semantic: dict[str, Any] | None) -> list[str]:
+    """Topic suggestions from the embedding step, for router.toml."""
+    if semantic is None:
+        return []
+    if semantic.get("skipped") or semantic.get("error"):
+        return [f"- 主題建議：略過（{semantic.get('skipped') or semantic.get('error')}）"]
+    topics = semantic.get("topics") or []
+    count = semantic.get("topic_candidates", 0)
+    if not topics:
+        return [f"- 主題建議：主題詞找不到的 {count} 筆記憶沒有分出相似的群"]
+    lines = [f"- 建議主題（向量分群，資訊）：主題詞找不到的 {count} 筆記憶分出 {len(topics)} 群；"
+             "審閱後加到 router.toml 的 [[knowledge.topic]]。注意：寫了這段就會取代內建的主題清單，"
+             "要連同內建的 memory、web、ci、agents、ui、shell、git 一起列"]
+    for topic in topics[:TOPIC_LIST_LIMIT]:
+        kind = {"configured": "既有主題，現有的詞找不到這幾筆，補觸發詞",
+                "unworded": "既有主題，目前沒有觸發詞"}.get(topic.get("status"), "新主題")
+        words = "、".join(topic["words"]) or "（沒有共同的詞，請自己取）"
+        lines.append(f"  - 「{topic['name']}」（{kind}，{len(topic['members'])} 筆）：觸發詞 {words}；成員 "
+                     + "、".join(topic["members"]))
+    if len(topics) > TOPIC_LIST_LIMIT:
+        lines.append(f"  - 另有 {len(topics) - TOPIC_LIST_LIMIT} 群，完整清單在同日的 JSON")
+    return lines
 
 
 def cross_project_lines(cross_project: dict[str, Any]) -> list[str]:
     """The report's cross-project section: at most CROSS_PROJECT_LIST_LIMIT
     pairs, named ones and the most similar first, then the total (ruling 52
     f); the JSON report keeps every pair."""
+    from .merge_drafts import INFERRED
+
     pairs = cross_project["pairs"]
     lines = []
     if not pairs:
         lines.append(f"- 沒有找到（明文互指，或相似度 ≥ {cross_project['threshold']}）")
     for pair in pairs[:CROSS_PROJECT_LIST_LIMIT]:
-        how = "明文互指" if pair["named"] else f"相似度 {pair['overlap']}"
-        origins = "／".join("、".join(o) for o in pair["origins"])
+        if pair["named"] or pair["overlap"] >= cross_project["threshold"]:
+            how = "明文互指" if pair["named"] else f"相似度 {pair['overlap']}"
+            if pair.get("semantic") is not None:
+                how += f"，語意 {pair['semantic']}"
+        else:
+            how = f"語意相似 {pair['semantic']}（用字 {pair['overlap']}）"
+        if pair.get("via"):
+            how += "，經由已併入的 " + "、".join(pair["via"])
+        origins = "／".join("、".join([*places, *(f"{p}（{INFERRED}）" for p in inferred)])
+                           for places, inferred in zip(pair["origins"], pair.get("inferred") or [[], []]))
         lines.append(f"- {pair['ids'][0]} ↔ {pair['ids'][1]}（{how}；學到的地方 {origins}）")
         lines.append("  - 建議：若是同一個教訓，合併成一筆 applies=global，或把其中一筆 supersede 成 applies=global")
     if len(pairs) > CROSS_PROJECT_LIST_LIMIT:
         lines.append(f"- 共 {len(pairs)} 對，只列前 {CROSS_PROJECT_LIST_LIMIT} 對（明文互指優先，再依相似度）；完整清單在同日的 JSON")
     elif pairs:
         lines.append(f"- 共 {len(pairs)} 對")
+    semantic = cross_project.get("semantic")
+    if semantic is not None:
+        if semantic.get("skipped") or semantic.get("error"):
+            lines.append(f"- 向量配對：略過（{semantic.get('skipped') or semantic.get('error')}），只用用字相似度")
+        else:
+            added = (cross_project.get("semantic_only") or {}).get("added", 0)
+            left = (cross_project.get("semantic_only") or {}).get("left_out", 0)
+            lines.append(f"- 向量配對：用字沒抓到、語意相似 ≥ {SEMANTIC_PAIR_THRESHOLD} 的多找到 {added} 對"
+                         + (f"（每週最多 {SEMANTIC_PAIR_LIMIT} 對，另有 {left} 對沒列）" if left else ""))
+    drafts = cross_project.get("drafts") or {}
+    if drafts.get("groups"):
+        lines.append(f"- 合併草稿：{len(drafts['groups'])} 組，在 {drafts['dir']}（只產生草稿，不會自動執行；照各組的 README.md 審閱）")
+        lines += [f"  - {group['general_id']}" + ("（加入既有通用教訓）" if group.get("join") else "") + " ← "
+                  + "、".join(group["members"]) for group in drafts["groups"][:CROSS_PROJECT_LIST_LIMIT]]
+    if drafts.get("dismissed"):
+        lines.append(f"- 已排除 {drafts['dismissed']} 組（memoryctl doctor dismiss 記下不是同一個教訓的）")
+    if drafts.get("dismissed_candidates"):
+        lines.append(f"- 已排除 {drafts['dismissed_candidates']} 筆加入既有通用教訓的候選（memoryctl doctor dismiss <通用教訓> <候選>）")
     if cross_project["other_machine"]:
         lines.append("- 綁在其他機器的紀錄（若根本原因與機器無關，考慮改成全域）：")
         lines += [f"  - {item['id']}（{item['machine'][:8]}…，{item['created']}）" for item in cross_project["other_machine"]]
+    same_place = cross_project.get("same_place") or []
+    threshold = cross_project.get("same_place_threshold", SAME_PLACE_SIMILARITY)
+    if not same_place:
+        lines.append(f"- 同一個地方可能重複記了兩次：沒有（相似度 ≥ {threshold}）")
+    else:
+        lines.append(f"- 同一個地方可能重複記了兩次（相似度 ≥ {threshold}；不產生草稿，是同一個就 supersede 成一筆）：")
+        lines += [f"  - {pair['ids'][0]} ↔ {pair['ids'][1]}（相似度 {pair['overlap']}；地方 {'、'.join(pair['places'])}）"
+                  for pair in same_place[:SAME_PLACE_LIST_LIMIT]]
+        if len(same_place) > SAME_PLACE_LIST_LIMIT:
+            lines.append(f"  - 共 {len(same_place)} 對，只列前 {SAME_PLACE_LIST_LIMIT} 對；完整清單在同日的 JSON")
     return lines
 
 

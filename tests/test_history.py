@@ -106,5 +106,121 @@ class SearchTests(unittest.TestCase):
         self.assertGreaterEqual(json.loads(listed.stdout)["count"], 2)
 
 
+class SearchMatchingTests(unittest.TestCase):
+    """English words match whole, side-by-side words count as a phrase, and a
+    record of the project the search runs from counts for more (spec 實際使用回饋改善 F9)."""
+
+    def test_an_english_word_matches_only_whole(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            put(root, "fact", "fact.alpha.kiln_store_listing", value="The kiln app is listed on the play store.")
+            put(root, "fact", "fact.alpha.kiln_screenshots", value="Kiln screenshots run under playwright on a wide display.")
+            core.reindex(root)
+            found = [hit["id"] for hit in history.search(root, "kiln play")]
+        self.assertEqual(["fact.alpha.kiln_store_listing", "fact.alpha.kiln_screenshots"], found)
+        # Both hold "kiln"; only one holds "play" as a word, so it ranks first by a whole content hit.
+
+    def test_an_ids_underscores_part_its_words_and_a_few_endings_still_match(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            put(root, "fact", "fact.alpha.kiln_idle_reaper", value="Stops idle kiln timers.")
+            put(root, "fact", "fact.alpha.reaperbot_logs", value="Where the bot writes its logs.")
+            put(root, "fact", "fact.alpha.glaze_steps", value="Glaze steps are chained one after another.")
+            put(root, "fact", "fact.alpha.chainsaw_notes", value="Notes on the chainsaw.")
+            core.reindex(root)
+            reaper = [hit["id"] for hit in history.search(root, "reaper")]
+            chain = [hit["id"] for hit in history.search(root, "chain")]
+        self.assertEqual(["fact.alpha.kiln_idle_reaper"], reaper)  # reaperbot is another word
+        self.assertEqual(["fact.alpha.glaze_steps"], chain)  # chained, not chainsaw
+
+    def test_a_two_letter_word_takes_no_ending_and_a_version_number_is_one(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            put(root, "fact", "fact.alpha.kiln_user_list", value="Every user of the kiln signs in.")
+            put(root, "fact", "fact.alpha.kiln_first_aid", value="The first aid box hangs by the kiln.")
+            put(root, "fact", "fact.alpha.kiln_runtime", value="The kiln scripts run on python3 only.")
+            core.reindex(root)
+            us = [hit["id"] for hit in history.search(root, "us")]
+            ai = [hit["id"] for hit in history.search(root, "ai")]
+            python = [hit["id"] for hit in history.search(root, "python")]
+        self.assertNotIn("fact.alpha.kiln_user_list", us)
+        self.assertNotIn("fact.alpha.kiln_first_aid", ai)
+        self.assertEqual(["fact.alpha.kiln_runtime"], python)
+
+    def test_two_words_side_by_side_count_as_a_phrase(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            put(root, "fact", "fact.alpha.basalt_apart", value="The basalt shelf and the kiln mould are in the north room.")
+            put(root, "fact", "fact.alpha.basalt_phrase", value="The north room keeps the basalt kiln shelf mould.")
+            core.reindex(root)
+            hits = history.search(root, "basalt kiln")
+        scores = {hit["id"]: hit["score"] for hit in hits}
+        self.assertEqual("fact.alpha.basalt_phrase", hits[0]["id"])
+        self.assertEqual(20, scores["fact.alpha.basalt_phrase"] - scores["fact.alpha.basalt_apart"])
+
+    def test_another_project_s_record_goes_behind_never_out_and_a_global_lesson_is_nobody_s(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            # One word in its text only, scoped to another project: 20 points, behind but kept.
+            put(root, "fact", "fact.beta.ash_layers", scope="project:beta", value="Tephra layers hold the dates.")
+            # Global, learned in beta: its origin is where it was learned, not where it applies.
+            core.record(root, "failure", {
+                "id": "failure.git.tephra_split", "scope": "global", "source": "locally-verified", "evidence": "Fixture.",
+                "origin": "project:beta", "symptom": "Tephra paths split across repos.", "attempt": "a",
+                "root_cause": "r", "verified_fix": "Keep one tephra repo.", "retry_when": "w"})
+            core.reindex(root)
+            found = {hit["id"]: hit["score"] for hit in history.search(root, "tephra", cwd=paths["alpha"])}
+            named = [hit["id"] for hit in history.search(root, "tephra", cwd=paths["alpha"], project="beta")]
+        self.assertIn("fact.beta.ash_layers", found)
+        self.assertGreater(found["failure.git.tephra_split"], found["fact.beta.ash_layers"])
+        self.assertIn("fact.beta.ash_layers", named)
+
+    def test_only_a_record_scoped_to_the_cwd_s_project_gets_its_bonus(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            # Both global with the same words; one was learned in alpha.
+            for name, origin in (("learned_here", {"origin": "project:alpha"}), ("learned_nowhere", {})):
+                core.record(root, "failure", {
+                    "id": f"failure.git.pumice_{name}", "scope": "global", "source": "locally-verified",
+                    "evidence": "Fixture.", **origin, "symptom": "Pumice dust clogged the kiln vents.", "attempt": "a",
+                    "root_cause": "r", "verified_fix": "Vacuum the vents first.", "retry_when": "w"})
+            put(root, "fact", "fact.alpha.pumice_vents", scope="project:alpha", value="Pumice dust clogged the kiln vents.")
+            core.reindex(root)
+            found = {hit["id"]: hit["score"] for hit in history.search(root, "pumice vents", cwd=paths["alpha"])}
+        self.assertEqual(found["failure.git.pumice_learned_nowhere"], found["failure.git.pumice_learned_here"])
+        self.assertGreater(found["fact.alpha.pumice_vents"], found["failure.git.pumice_learned_here"])
+
+    def test_the_project_the_search_runs_from_first_and_another_projects_record_last(self) -> None:
+        with router_baseline.environment() as paths:
+            root = paths["memory"]
+            # The same words in three records: of alpha, of no project, of another project.
+            put(root, "fact", "fact.zz.obsidian_cooling_here", scope="project:alpha", value="Obsidian cooling takes four hours.")
+            put(root, "fact", "fact.mm.obsidian_cooling_anywhere", value="Obsidian cooling takes four hours.")
+            put(root, "fact", "fact.aa.obsidian_cooling_there", scope="project:beta", value="Obsidian cooling takes four hours.")
+            core.reindex(root)
+
+            def ids(cwd: Path) -> list[str]:
+                # memoryctl search runs from where the agent works.
+                import contextlib
+                import io
+                import os
+
+                from agent_memory import cli
+
+                out, before = io.StringIO(), os.getcwd()
+                os.chdir(cwd)
+                try:
+                    with contextlib.redirect_stdout(out):
+                        cli.main(["search", "--query", "obsidian cooling", "--json"])
+                finally:
+                    os.chdir(before)
+                return [hit["id"] for hit in json.loads(out.getvalue())["hits"] if "obsidian_cooling" in hit["id"]]
+
+            here, elsewhere = ids(paths["alpha"]), ids(paths["neutral"])
+        self.assertEqual(["fact.zz.obsidian_cooling_here", "fact.mm.obsidian_cooling_anywhere", "fact.aa.obsidian_cooling_there"], here)
+        self.assertEqual(["fact.aa.obsidian_cooling_there", "fact.mm.obsidian_cooling_anywhere", "fact.zz.obsidian_cooling_here"],
+                         elsewhere)  # outside any project, equal scores keep their order by id
+
+
 if __name__ == "__main__":
     unittest.main()

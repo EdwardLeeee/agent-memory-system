@@ -7,6 +7,7 @@ disposable and reconstructible from it.
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -535,6 +536,12 @@ def command_phrases(text: str, stoplist: "Any" = ()) -> list[str]:
     ]
 
 
+def _usable_outbound(triggers: "Any") -> list[str]:
+    from .core import outbound_trigger_problem
+
+    return [str(item) for item in triggers if isinstance(item, str) and not outbound_trigger_problem(item)]
+
+
 def trigger_entry(
     metadata: dict[str, Any], body: str, stoplist: "Any" = (), routing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -551,6 +558,9 @@ def trigger_entry(
         "applies": metadata.get("applies"),
         "created_at": str(metadata.get("created_at") or ""),
         "explicit": [str(item) for item in (metadata.get("triggers") or [])],
+        # What the agent sends or replies, not what it runs (F13); one
+        # validate names is left out (F13 re-check 1).
+        "outbound": _usable_outbound(metadata.get("outbound_triggers") or []),
         "phrases": command_phrases(text, stoplist),
         "symptom": " ".join(_extract_section(body, "Symptom").split()),
         "verified_fix": " ".join(_extract_section(body, "Verified Fix").split()),
@@ -589,6 +599,108 @@ def _refresh_triggers(root: Path) -> None:
         write_triggers(root, [(json.loads(str(row[0])), str(row[1])) for row in rows])
     except (OSError, sqlite3.Error, ValueError):
         return
+
+
+# --- Ledger decisions a project has since recorded itself (F8) -------------
+#
+# A project's own decision record (an ADR, a decision log's entry) that
+# appeared after a ledger decision of that project was last updated, and says
+# much the same: at least NEWER_SHARED_MIN words that fewer than rare_share of
+# all records hold (and fewer than rare_min_docs, as for the relevance floor),
+# and that many a fifth or more of the shorter's. Computed
+# when the index is built, so the prompt hook only looks it up.
+
+NEWER_SHARED_MIN = 5
+NEWER_SHARE_MIN = 0.2
+NEWER_SHOWN = 2
+
+
+def _newer_decisions_path(root: Path) -> Path:
+    return root / ".cache" / "newer_decisions.json"
+
+
+def read_newer_decisions(root: Path) -> dict[str, list[dict[str, str]]]:
+    """ledger decision id -> the newer project records, best first; {} when
+    not computed."""
+    try:
+        value = json.loads(_newer_decisions_path(root).read_text(encoding="utf-8")).get("decisions")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _moment(value: str) -> datetime | None:
+    """A time to compare: an ISO time with its zone, or a day alone as its
+    start where the user is (a log's heading); None when neither (F8,
+    retrieval review: one side was a UTC day, the other a local one)."""
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.now().astimezone().tzinfo)
+
+
+def write_newer_decisions(root: Path) -> None:
+    from .core import _query_terms
+
+    connection = sqlite3.connect(_index_path(root))
+    try:
+        routing = load_index_routing(connection) or compute_routing()
+        rows = [(json.loads(str(meta)), str(body)) for meta, body in connection.execute(
+            "SELECT metadata_json, body FROM records WHERE kind = 'decision' OR record_id LIKE 'federation.%'")]
+        total = int(connection.execute("SELECT count(*) FROM records").fetchone()[0])
+        connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.records_vocab USING fts5vocab(main, records_fts, 'row')")
+        held = {str(term): int(docs) for term, docs in connection.execute("SELECT term, doc FROM temp.records_vocab")}
+    finally:
+        connection.close()
+    relevance = load_router_settings().get("relevance") or {}
+    limit = max(float(relevance.get("rare_share") or 0.05) * total, int(relevance.get("rare_min_docs") or 0))
+    function_chars = set(str(relevance.get("function_chars") or ""))
+
+    def uncommon(text: str) -> set[str]:
+        """The uncommon meaningful words of `text`: a Chinese bigram with a
+        function character (的記, 在的) is a fragment, as in F3 (retrieval
+        review), not a word two records could share."""
+        found = set()
+        for term in _query_terms(text):
+            if len(term) == 2 and re.search(r"[\u3400-\u9fff]", term) and function_chars & set(term):
+                continue
+            pieces = [piece for piece in re.split(r"[^0-9a-z\u3400-\u9fff]+", term) if piece]
+            if pieces and min(held.get(piece, 0) for piece in pieces) < limit:
+                found.add(term)
+        return found
+
+    records: dict[str, list[tuple[str, str, set[str]]]] = {}
+    ledger = []
+    for metadata, body in rows:
+        record_id = str(metadata.get("id", ""))
+        if record_id.startswith("federation."):
+            if metadata.get("decision_record") and metadata.get("recorded_on"):
+                anchor = str((metadata.get("origin") or {}).get("anchor") or "")
+                terms = uncommon(f"{anchor} {_extract_section(body, 'Decision') or _extract_section(body, 'Value')}")
+                for tag in metadata.get("affinity") or []:
+                    if str(tag).startswith("project:"):
+                        records.setdefault(str(tag)[len("project:"):], []).append(
+                            (record_id, str(metadata["recorded_on"]), terms))
+        elif metadata.get("kind") == "decision":
+            words = record_id.split(".", 2)[-1].replace("_", " ")
+            terms = uncommon(f"{words} {_extract_section(body, 'Problem')} {_extract_section(body, 'Decision')}")
+            ledger.append((record_id, str(metadata.get("updated_at") or ""), origin_projects(metadata, routing), terms))
+    found: dict[str, list[dict[str, str]]] = {}
+    for record_id, updated, projects, terms in ledger:
+        matches = []
+        updated_at = _moment(updated)
+        for project in projects:
+            for other, day, other_terms in records.get(project, []):
+                shared = len(terms & other_terms)
+                recorded = _moment(day)
+                if (updated_at is not None and recorded is not None and recorded > updated_at
+                        and shared >= NEWER_SHARED_MIN and shared >= NEWER_SHARE_MIN * min(len(terms), len(other_terms))):
+                    matches.append((shared / min(len(terms), len(other_terms)), other, day[:10]))
+        if matches:
+            found[record_id] = [{"id": other, "recorded_on": day} for _, other, day in sorted(matches, reverse=True)[:NEWER_SHOWN]]
+    atomic_write_text(_newer_decisions_path(root),
+                      json.dumps({"generated_at": utc_now(), "decisions": found}, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 # --- Fact entities (spec 8.6) -----------------------------------------------
@@ -952,6 +1064,11 @@ def _refresh_lexical_index(root: Path, record_id: str) -> None:
                 _refresh_fact_entities(root)
             if (root / "records" / "failure" / f"{record_id}.md").exists():
                 _refresh_triggers(root)
+            if (root / "records" / "decision" / f"{record_id}.md").exists():
+                try:
+                    write_newer_decisions(root)
+                except Exception:
+                    pass
     except (MemoryError, OSError, sqlite3.Error):
         return
 
@@ -1249,6 +1366,10 @@ def reindex(root: Path) -> int:
         try:
             write_triggers(root, [(metadata, body) for _, metadata, body in active], routing)
         except OSError:
+            pass
+        try:
+            write_newer_decisions(root)
+        except Exception:  # a derived hint never stops reindex
             pass
         # Listing worktrees must never stop reindex or sync (ruling 51 f).
         try:

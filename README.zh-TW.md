@@ -30,7 +30,7 @@ English: [README.md](README.md)
 - **教訓出現在危險的那一刻**：失敗紀錄有 `retry_when` 欄位。PreToolUse hook 拿 agent 正要執行的指令去比對這些教訓，命中就把那筆失敗附在指令結果旁邊。另外有一份由你維護的危險指令清單（強制推送、`rm -rf`、`reset --hard`……），每個 session 第一次碰到會停一次並顯示教訓，第二次放行。
 - **決策靠結果校準**：決策只是「當時的選擇」，不是規則。經驗以 `supports`、`contradicts`、`narrows`、`inconclusive` 連到決策；檢索時決策旁邊會顯示證據計數與最新反證。改決策一定要 `supersede`，附上改變的驅動因素與理由，舊版留在稽核鏈裡。
 - **專案知識用聯邦，不複製**：專案自己的 ADR、結算檔、筆記、git log 透過一份設定檔唯讀索引進來。跨報告重複出現的根本原因會自動變成「教訓候選」；不會有東西在你不知情時寫進帳本。
-- **自我量測**：每週 `memoryctl doctor` 檢查管線並量「注入的記憶有沒有真的被引用」；`memoryctl rate` 是每週十幾題的簡短問卷。
+- **自我量測**：每週 `memoryctl doctor` 檢查管線並量「注入的記憶有沒有真的被用到」（從 agent 寫的內容判斷）；`memoryctl rate` 是每週十幾題的簡短問卷。
 
 ## 為什麼是樹狀路由，不是一個大 RAG
 
@@ -70,14 +70,15 @@ English: [README.md](README.md)
 
 | 事件 | 注入什麼 | 預算（Claude Code／Codex） |
 |---|---|---|
-| SessionStart | 本 session 的進度膠囊、critical 與 high 偏好、最多三筆其他進行中任務、cwd 在聯邦專案內時的 PROJECT LESSONS | 5000／2800 tokens |
-| UserPromptSubmit | 這個問題路由出來的 Context Pack，分成 NON-NEGOTIABLE CONSTRAINTS、WORKING DECISIONS、RELEVANT EXPERIENCES、REFERENCE DATA、PROJECT LESSONS、SOURCE IDS | 3000／1800 tokens |
+| SessionStart | 本 session 的進度膠囊、critical 與 high 偏好、最多三筆其他進行中任務、cwd 在聯邦專案內時的 PROJECT LESSONS | 5000／3400 tokens |
+| UserPromptSubmit | 這個問題路由出來的 Context Pack，分成 NON-NEGOTIABLE CONSTRAINTS、WORKING DECISIONS、RELEVANT EXPERIENCES、REFERENCE DATA、PROJECT LESSONS、SOURCE IDS；在 Claude Code 裡，上一則回覆命中某筆失敗的 `outbound_triggers` 時，最前面另有一行 `上一則回覆可能需要更正：…（id）` | 3000／1800 tokens |
 | PreToolUse（Bash） | `FOR THIS COMMAND`：最多兩筆觸發片語命中這條指令的失敗教訓；或危險清單指令的一次性暫停 | 600／400 tokens |
+| PreToolUse（SendMessage、AskUserQuestion；只有 Claude Code） | `送出的內容可能需要再查：`：最多兩筆 `outbound_triggers` 命中正要送出內容的失敗教訓；從不暫停 | 600 tokens |
 | PreCompact | 不注入，只在本機寫一個標記 | - |
 
 每個 hook 出任何錯都以 exit 0 回 `{"continue": true}`；PreToolUse 因為在每個 shell 指令前執行，另外會在 2 秒後自己放棄。錯誤只記在本機的小健康檔，不給模型看。不安裝 Stop hook。
 
-每份 Context Pack 第一行（繁體中文）請 agent 在採用某筆記憶時寫「依據 <id>」。靠這一行，引用率才量得出來。
+agent 有沒有用到某筆記憶，是從它寫的內容判斷，不再要求它寫：在使用者下一則訊息之前，它的回覆或工具輸入寫出那筆的 id，或重複那筆特有的內容（長路徑、commit hash、帶單位的數字、八個字的中文或四個字的英文片語），而且使用者自己的訊息裡沒有。只有關掉路由時，Context Pack 第一行才仍請 agent 寫「依據 <id>」。
 
 ### 證據，不是信心分數
 
@@ -128,6 +129,7 @@ memoryctl health
 cp ~/agent-memory-system/docs/router.example.toml ~/.config/agent-memory/router.toml   # 預算、主題詞表、危險清單
 memoryctl doctor install-timer --enable      # 每週健康報告（Linux 的 systemd --user）
 memoryctl sources sync <專案>                # 先寫好 ~/.config/agent-memory/sources.d/<專案>.toml
+cp ~/agent-memory-system/docs/generate.example.toml ~/.config/agent-memory/generate.toml   # 選定紀錄的 Markdown 檔
 ```
 
 herdr 的整合是選用的：危險清單裡的 `herdr server stop`、agents 主題詞裡的 herdr，以及裝了 herdr 時 doctor 透過它送出的通知。沒有 herdr 時，這幾項都不會有任何作用。
@@ -148,7 +150,10 @@ herdr 的整合是選用的：危險清單裡的 `herdr server stop`、agents �
 | 指令 | 用途 |
 |---|---|
 | `memoryctl record --kind <種類> --input file.json` | 寫入偏好、事實、決策、經驗、失敗或任務 |
-| `memoryctl checkpoint --input file.json` | 存本 session 的進度膠囊（session id 由 agent 環境提供） |
+| `memoryctl checkpoint --input file.json` | 存本 session 的進度膠囊（session id 由 agent 環境提供）；選填的 `tasks` 一項一行 |
+| `memoryctl checkpoint --set 欄位=值` / `--show` | 直接改存好的膠囊，一個欄位或 `tasks.<id>.status=done`；印出膠囊 |
+| `memoryctl template <種類>` | 印出 record、supersede、checkpoint 的 JSON 骨架；缺欄位時會一次列出全部 |
+| `memoryctl task done <id>` | 把待辦標成完成（task 可帶含時區的 `due`；一天內到期的 open 待辦會在開場列出） |
 | `memoryctl supersede --id <id> --input file.json` | 以新版本與理由取代現行紀錄 |
 | `memoryctl context --cwd 目錄 --query 文字 [--agent claude|codex] [--explain]` | 看某個問題會注入什麼，每筆附節點與分數 |
 | `memoryctl search --query 文字 [--include-archive]` | 查歷史：舊版本、事件、閒置膠囊 |
@@ -169,7 +174,7 @@ herdr 的整合是選用的：危險清單裡的 `herdr server stop`、agents �
 | fact | 驗證過、可能會過期的事實（`expires_at`）；機器範圍的事實不會離開那台機器 | 實體詞（主機、工具、別名） |
 | decision | value、rationale、constraints、alternatives、consequences、revisit_when | 專案或主題節點 |
 | experience | 情境、預期、行動、實際結果、適用範圍、決策連結 | 專案或主題節點；或作為決策的證據被帶出 |
-| failure | 症狀、嘗試、根本原因、驗證過的修法、retry_when、證據，可選的 `triggers` regex | 正要執行的指令；本專案的失敗另可由字詞 |
+| failure | 症狀、嘗試、根本原因、驗證過的修法、retry_when、證據，可選的 `triggers` regex（比對指令）與 `outbound_triggers`（比對 agent 說的話） | 正要執行的指令；Claude Code 正要送出或剛回覆的內容；本專案的失敗另可由字詞 |
 | task／checkpoint | 長期任務事實／本 session 的進度膠囊 | 歷史層／精確 session id |
 
 範圍：`global`、`project:<名稱>`、`workspace:<名稱>`、`machine:<uuid>`。機器範圍是硬過濾。
@@ -197,7 +202,7 @@ herdr 的整合是選用的：危險清單裡的 `herdr server stop`、agents �
 
 ## 怎麼知道它有沒有用
 
-- **`memoryctl doctor run`**（可裝每週計時器）檢查：未推送的 commit、hook 健康、各 agent 開場包大小、偏好成長、過期膠囊、來源同步時間、黃金查詢、記憶體夠時跑測試、自己的峰值記憶體。效果訊號：注入紀錄的引用率、注入過但從未被引用的紀錄、重複犯錯、重複交代、壓縮後恢復成功率、失敗層命中。
+- **`memoryctl doctor run`**（可裝每週計時器）檢查：未推送的 commit、hook 健康、各 agent 開場包大小、偏好成長、過期膠囊、來源同步時間、黃金查詢、記憶體夠時跑測試、自己的峰值記憶體。效果訊號：注入紀錄的使用率（明寫 id 與內容相符）、注入過但從未被用到的紀錄、重複犯錯、重複交代、壓縮後恢復成功率、失敗層命中。
 - **`memoryctl rate`**：十幾題，問你這週看到的記憶有沒有用；答案只存本機。
 - **黃金查詢**（`doctor/golden.toml`）釘住已知問題必須回、不得回的東西，檢索改動不會悄悄退步。
 - 12 個合成案例（6 個檢索、6 個壓縮後接續）的配對 memory-on／off 試驗：memory-on 11/12 通過，memory-off 3/12。每案只跑一次，是方向性的結果，不是母體效果。細節在 `docs/EVALUATION.md`；評估用的題組本身不在這個 repo 裡。
@@ -215,9 +220,11 @@ herdr 的整合是選用的：危險清單裡的 `herdr server stop`、agents �
 
 | 文字 | 出現在哪裡 | 能不能改 |
 |---|---|---|
-| `採用某筆記憶時，請在回覆寫一次「依據 <id>」。` | 每份 Context Pack 的第一行 | 沒有設定可改；在 `agent_memory/storage.py` 的 `CITATION_REQUEST`。引用率統計找的是「依據 <id>」。 |
+| `採用某筆記憶時，請在回覆寫一次「依據 <id>」。` | 關掉路由時 Context Pack 的第一行 | 沒有設定可改；在 `agent_memory/storage.py` 的 `CITATION_REQUEST`。開著路由時，使用率從 agent 寫的內容判斷。 |
 | 危險清單的理由，例如「強制推送會覆蓋遠端歷史；…」 | PreToolUse 暫擋時的訊息 | 可以：把 `docs/router.example.toml` 的 `[[failures.speed_bump]]` 清單複製到 `router.toml`，自己寫 `reason`（這份清單會整個取代內建的）。 |
 | 「本 session 尚未確認過這類指令；確認後再執行一次就會放行。」 | 每則暫擋訊息的最後一句 | 沒有設定可改；在 `agent_memory/pretool.py` 的 `RELEASE_LINE`。 |
+| 「由記憶系統自動產生，不要手改；新增或修改請用 memoryctl record／supersede」 | 每個產生的 Markdown 檔的開頭 | 沒有設定可改；在 `agent_memory/generate.py` 的 `MARKER`。這行也代表記憶系統可以重寫這個檔案。 |
+| 「送出的內容可能需要再查：」與「上一則回覆可能需要更正：」 | 關於正要送出內容的教訓之前，與關於上一則回覆的那一行開頭 | 沒有設定可改；在 `agent_memory/turns.py` 的 `OUTBOUND_HEADER` 與 `CORRECTION_PREFIX`。 |
 | 包裡的輔助行：「- 學到的地方：…」、「更多：memoryctl search --query <詞>」、「（其餘 N 條：…）」、PROJECT LESSONS 的導覽行與「目前沒有教訓候選；…」 | Context Pack 裡 | 沒有設定可改；在 `agent_memory/pretool.py`、`router.py`、`core.py`。 |
 | 部分預設主題詞（記憶、記憶體、閘門…） | 決定問句會打開哪些知識主題 | 可以：`router.toml` 的 `[knowledge]` 主題。 |
 | `memoryctl doctor` 的報告與通知、`memoryctl rate` 的問題 | 終端機與報告資料夾 | 沒有設定可改；在 `agent_memory/doctor.py`、`rating.py`。 |
@@ -237,7 +244,7 @@ agent_memory/      core.py（帳本、各種 pack）、router.py（路由樹）�
                    federation.py、doctor.py、rating.py、adapters.py、storage.py、cli.py
 bin/memoryctl      進入點；PreToolUse hook 的快路徑
 adapters/          合併進 CLAUDE.md／AGENTS.md／GEMINI.md 的指引片段
-docs/              ARCHITECTURE.md、SCHEMA.md、EVALUATION.md、HANDBOOK.zh-TW.md、router.example.toml、sources.example.toml
+docs/              ARCHITECTURE.md、SCHEMA.md、EVALUATION.md、HANDBOOK.zh-TW.md、router.example.toml、sources.example.toml、generate.example.toml
 examples/          每種紀錄的 JSON 輸入範例
 tests/             單元與整合測試、逐位元組相同的路由基準 fixture
 tools/             基準測試（題組不隨程式發布）、手冊產生器、公開版匯出

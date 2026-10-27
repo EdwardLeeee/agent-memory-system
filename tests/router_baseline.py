@@ -84,10 +84,13 @@ def environment(
     before `init` builds the index. No semantic.json is written, so auto
     retrieval is lexical. `router_toml`, when given, is written to the config
     home before anything is indexed; `extra_records`, when given, is called
-    with the store path to add canonical records before the index is built
-    (the router tests use it; the recorded baseline never does).
+    with the store path to add canonical records, under the temporary config
+    home, and the index is built again after it (the router tests use it;
+    the recorded baseline never does). Called before, a record written with
+    core.record built the index from this machine's own configuration: its
+    projects reached the fixtures.
     """
-    from agent_memory.core import initialize
+    from agent_memory.core import initialize, reindex
 
     with tempfile.TemporaryDirectory(prefix="router-baseline-") as tmp:
         base = Path(tmp)
@@ -97,8 +100,6 @@ def environment(
         alpha = work / "alpha"
         neutral = work / "neutral"
         shutil.copytree(FIXTURE / "store", memory)
-        if extra_records is not None:
-            extra_records(memory)
         shutil.copytree(FIXTURE / "source-repo", alpha)
         neutral.mkdir(parents=True)
         _git(alpha, "init", "-q")
@@ -116,6 +117,9 @@ def environment(
             for name in SESSION_ENV_NAMES:
                 os.environ.pop(name, None)
             initialize(memory, MACHINE_ID)
+            if extra_records is not None:
+                extra_records(memory)
+                reindex(memory)
             yield {"base": base, "memory": memory, "config": config, "alpha": alpha, "neutral": neutral}
 
 

@@ -21,6 +21,7 @@ exit code 0: a broken hook must never block a command.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -29,13 +30,16 @@ import re
 import shlex
 import signal
 import sys
+import threading
 import time
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterator, TextIO
 
 from .storage import (
+    AGENT_OUTBOUND_TOOLS,
     AGENT_SHELL_TOOLS,
+    CLAUDE_HOOK_CHAR_LIMIT,
+    hook_chars,
     project_membership,
-    CITATION_REQUEST,
     ID_RE,
     _is_expired,
     _session_key,
@@ -550,8 +554,128 @@ def failure_block(entry: dict[str, Any]) -> list[str]:
     ]
 
 
+# --- What the agent sends (spec 實際使用回饋改善 F13) --------------------------------
+#
+# A failure may carry outbound_triggers: regexes for what the agent says,
+# not what it runs (a universal word, a schedule nobody estimated). What a
+# SendMessage or AskUserQuestion call is about to send is checked here and
+# the lesson attached, never held; the agent's plain reply cannot be caught
+# by a tool, so the next prompt hook checks it (core._reply_notice). Each
+# record reminds a session at most once every turns.OUTBOUND_GAP turns.
+
+
+def outbound_text(tool: str, tool_input: Any) -> str:
+    """What a SendMessage or AskUserQuestion call sends."""
+    if not isinstance(tool_input, dict):
+        return ""
+    if tool == "SendMessage":
+        return "\n".join(str(tool_input.get(key) or "") for key in ("message", "summary"))
+    parts = []
+    for question in tool_input.get("questions") or []:
+        if not isinstance(question, dict):
+            continue
+        parts.append(str(question.get("question") or ""))
+        for option in question.get("options") or []:
+            if isinstance(option, dict):
+                parts.extend(str(option.get(key) or "") for key in ("label", "description"))
+    return "\n".join(parts)
+
+
+# What a message or a reply is checked by: its first and last 10,000
+# characters. A pattern that is slow on long text (\d+\s*天 on a run of
+# digits takes two seconds at 10,000) stays bounded; a week's replies were
+# under 4,000 (F13 review 1).
+OUTBOUND_TEXT_MAX = 20_000
+
+
+def outbound_hits(text: str, cwd: str | None, entries: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The failures whose outbound_triggers match `text`, of those that
+    apply in `cwd` (one judged to apply only where it was learned, only
+    there)."""
+    entries = [entry for entry in (_load_triggers() if entries is None else entries) if entry.get("outbound")]
+    if not entries or not text.strip():
+        return []
+    if len(text) > OUTBOUND_TEXT_MAX:
+        text = text[: OUTBOUND_TEXT_MAX // 2] + "\n" + text[-(OUTBOUND_TEXT_MAX // 2):]
+    machine_id = _machine_id()
+    here = cwd_projects(cwd)
+    hits = []
+    for entry in entries:
+        if _is_expired(entry.get("expires_at")) or not _visible(str(entry.get("scope", "")), machine_id):
+            continue
+        if entry.get("applies") == "origin" and entry.get("origins") and not set(entry["origins"]) & here:
+            continue
+        for pattern in entry["outbound"]:
+            try:
+                if re.search(pattern, text):
+                    hits.append(entry)
+                    break
+            except re.error:
+                continue
+    return hits
+
+
+def one_sentence(entry: dict[str, Any], limit: int = 80) -> str:
+    """The first sentence of a failure's verified fix: what to do about it."""
+    text = re.split(r"[。；;\n]", str(entry.get("verified_fix") or entry.get("symptom") or ""), maxsplit=1)[0].strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _outbound(event: dict[str, Any], agent: str) -> tuple[dict[str, Any], str, str | None]:
+    settings = load_router_settings()
+    if not settings["enabled"]:
+        return SILENT, "ok", None
+    hits = outbound_hits(outbound_text(str(event.get("tool_name")), event.get("tool_input")), event.get("cwd"))
+    if not hits:
+        return SILENT, "ok", None
+    from .turns import due_reminders
+
+    session = str(event.get("session_id") or "")
+    agent_id = str(event.get("agent_id") or "") or None  # a subagent's reminders are its own
+    try:
+        due = set(due_reminders(session, [str(entry["id"]) for entry in hits], mark=False, agent_id=agent_id))
+    except OSError:
+        due = {str(entry["id"]) for entry in hits}
+    if not due:
+        return SILENT, "ok", "outbound-spaced"
+    # The same budget and limit as a shell command's failures.
+    budget = int(settings["budgets"].get(agent, settings["budgets"]["claude"])["failures"])
+    char_limit = CLAUDE_HOOK_CHAR_LIMIT if agent == "claude" else None
+    chosen: list[dict[str, Any]] = []
+    for entry in hits:
+        if len(chosen) >= MAX_INJECTED:
+            break
+        text = outbound_injection([*chosen, entry])
+        if str(entry["id"]) in due and estimate_tokens(text) <= budget and (char_limit is None or hook_chars(text) <= char_limit):
+            chosen.append(entry)
+    if not chosen:
+        return SILENT, "ok", None
+    try:
+        # Marked under the lock: a send in the same message may have just reminded one.
+        granted = set(due_reminders(session, [str(entry["id"]) for entry in chosen], agent_id=agent_id, sent=True))
+    except OSError:
+        granted = set()
+    chosen = [entry for entry in chosen if str(entry["id"]) in granted]
+    if not chosen:
+        return SILENT, "ok", "outbound-spaced"
+    return (
+        {"continue": True, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": outbound_injection(chosen)}},
+        "ok",
+        None,
+    )
+
+
+def outbound_injection(entries: list[dict[str, Any]]) -> str:
+    from .turns import OUTBOUND_HEADER
+
+    lines = [OUTBOUND_HEADER]
+    for entry in entries:
+        lines.extend(failure_block(entry))
+    return "\n".join(lines)
+
+
 def injection_text(entries: list[dict[str, Any]]) -> str:
-    lines = ["## FOR THIS COMMAND", CITATION_REQUEST]
+    lines = ["## FOR THIS COMMAND"]
     for entry in entries:
         lines.extend(failure_block(entry))
     lines.extend(["", "## SOURCE IDS", *[f"- {entry['id']}" for entry in entries]])
@@ -695,12 +819,13 @@ def _load_triggers() -> list[dict[str, Any]]:
     return [entry for entry in entries if isinstance(entry, dict) and entry.get("id")] if isinstance(entries, list) else []
 
 
-def cwd_projects(cwd: str | None) -> set[str]:
-    """The projects a cwd is in, from the table reindex writes."""
+def cwd_projects(cwd: str | None, root: Path | None = None) -> set[str]:
+    """The projects a cwd is in, from the table reindex writes in `root`
+    (the memory home by default)."""
     if not cwd:
         return set()
     try:
-        table = json.loads((memory_home() / ".cache" / "project_paths.json").read_text(encoding="utf-8"))
+        table = json.loads(((root or memory_home()) / ".cache" / "project_paths.json").read_text(encoding="utf-8"))
         resolved = Path(cwd).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
         return set()
@@ -750,6 +875,8 @@ def decide(event: dict[str, Any], agent: str) -> tuple[dict[str, Any], str, str 
     if event.get("hook_event_name") != "PreToolUse":
         return SILENT, "ok", "not-pre-tool-use"
     tool = event.get("tool_name")
+    if tool in AGENT_OUTBOUND_TOOLS.get(agent, ()):
+        return _outbound(event, agent)
     if tool not in AGENT_SHELL_TOOLS.get(agent, AGENT_SHELL_TOOLS["claude"]):
         return SILENT, "ok", None
     tool_input = event.get("tool_input")
@@ -812,11 +939,13 @@ def decide(event: dict[str, Any], agent: str) -> tuple[dict[str, Any], str, str 
         for entry in candidates
     ]
     budget = int(settings["budgets"].get(agent, settings["budgets"]["claude"])["failures"])
+    char_limit = CLAUDE_HOOK_CHAR_LIMIT if agent == "claude" else None
     chosen: list[dict[str, Any]] = []
     for entry in candidates:
         if len(chosen) >= MAX_INJECTED:
             break
-        if estimate_tokens(injection_text([*chosen, entry])) > budget:
+        text = injection_text([*chosen, entry])
+        if estimate_tokens(text) > budget or (char_limit is not None and hook_chars(text) > char_limit):
             continue
         try:
             first = mark_injected(folder, str(entry["id"]), "PreToolUse", prompt_id)
@@ -850,6 +979,26 @@ def _agent_from(argv: list[str]) -> str:
 
 def _on_time_limit(signum: int, frame: Any) -> None:
     raise _TimeLimit()
+
+
+@contextmanager
+def time_limit(seconds: float) -> Iterator[None]:
+    """Raise _TimeLimit in the block after `seconds`. A SIGALRM timer, so
+    only where one can be set: POSIX, the main thread, no timer running
+    already (main()'s covers what it calls); elsewhere the block runs as is."""
+    if (not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread()
+            or signal.getitimer(signal.ITIMER_REAL)[0] > 0):
+        yield
+        return
+    previous = signal.signal(signal.SIGALRM, _on_time_limit)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        finally:
+            signal.signal(signal.SIGALRM, previous)
 
 
 def main(

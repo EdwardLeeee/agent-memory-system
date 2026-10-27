@@ -12,16 +12,20 @@ replaced, so a later sync shows up as an ordinary diff). The export:
    copies public/ (README pair, LICENSE, CHANGELOG, CI, .gitignore) to the
    root;
 4. replaces this machine's home path, and the author's project names in the
-   prose documents, with neutral ones;
+   prose documents, with neutral ones (project-a, project-b, … each project
+   keeping its letter from export to export, in
+   ~/.config/agent-memory/public-export-placeholders.json);
 5. scans every file for identifying strings and key-shaped strings, and
    fails if any is left.
 
 Nothing personal is written in this file: the home path, user name, machine
 id, git identity, project names, every record id in the ledger, every
-16-character stretch of the golden query texts, and the start of every
-resume capsule are read from this
-machine at run time (machine.json, router.toml, sources.d, git config, the
-memory store, doctor/golden.toml). More strings to refuse,
+16-character stretch of the golden and probe query texts (the user's own
+words), the shorter Chinese probe queries, and the start of every resume
+capsule are read from this machine at run time (machine.json, router.toml,
+sources.d, git config, the memory store, doctor/golden.toml and
+doctor/probes.toml). tools/prerelease_transcript_check.py, which compares a
+snapshot with this machine's transcripts, stays private. More strings to refuse,
 or `old => new` replacements, go one per line in
 ~/.config/agent-memory/public-export.txt, which never leaves the machine.
 """
@@ -47,6 +51,7 @@ EXCLUDED = (
     "migration",  # the author's own migration reports and manifests
     "evaluation",  # the retrieval and Codex suites stay private
     "public",  # copied to the root below
+    "tools/prerelease_transcript_check.py",  # reads this machine's transcripts; run before each release
 )
 PROSE = ("docs/HANDBOOK.zh-TW.md", "docs/research/")
 KEY_SHAPES = [
@@ -84,15 +89,53 @@ def _local_settings() -> tuple[list[str], list[tuple[str, str]]]:
     return refuse, replace
 
 
+PLACEHOLDERS = Path.home() / ".config" / "agent-memory" / "public-export-placeholders.json"
+
+
+def _letters() -> "Iterator[str]":
+    """project-a … project-z, project-aa, project-ab, …"""
+    from itertools import count, product
+    from string import ascii_lowercase
+
+    for size in count(1):
+        for letters in product(ascii_lowercase, repeat=size):
+            yield "project-" + "".join(letters)
+
+
+def assigned_placeholders(projects: list[str]) -> dict[str, str]:
+    """Each project's placeholder, kept from export to export in a table on
+    this machine (never exported): one assigned before keeps its letter, a
+    new one takes the next letter free, so a document no longer changes
+    only because a project was added and the names sort anew (designer
+    2026-10-28)."""
+    try:
+        table = json.loads(PLACEHOLDERS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        table = {}
+    table = {str(key): str(value) for key, value in table.items()} if isinstance(table, dict) else {}
+    used = set(table.values())
+    free = (letter for letter in _letters() if letter not in used)
+    new = {project: next(free) for project in sorted(projects) if project not in table}
+    if new:
+        table.update(new)
+        PLACEHOLDERS.parent.mkdir(parents=True, exist_ok=True)
+        PLACEHOLDERS.write_text(json.dumps(table, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        PLACEHOLDERS.chmod(0o600)
+    return table
+
+
 def project_placeholders() -> dict[str, str]:
     """Each of the author's projects, and every name or alias routing knows
-    it by, mapped to project-a, project-b, ... (longest names first)."""
+    it by, mapped to its placeholder (`assigned_placeholders`; longest names
+    first)."""
     from agent_memory.lexical_index import compute_routing
 
     routing = compute_routing()
+    projects = routing.get("projects", {})
+    assigned = assigned_placeholders(list(projects))
     mapping: dict[str, str] = {}
-    for index, (project, tokens) in enumerate(sorted(routing.get("projects", {}).items())):
-        placeholder = f"project-{chr(ord('a') + index)}"
+    for project, tokens in sorted(projects.items()):
+        placeholder = assigned[project]
         mapping[project] = placeholder
         for token in tokens:
             if len(token) >= 4 or re.search(r"[\u3400-\u9fff]", token):
@@ -126,11 +169,34 @@ def identifying_strings() -> list[re.Pattern[str]]:
     patterns = [re.compile(re.escape(item), re.IGNORECASE) for item in found if len(item) >= 3]
     patterns += [re.compile(re.escape(item)) for item in _local_settings()[0] if len(item) >= 3]
     patterns += [re.compile(re.escape(item)) for item in ledger_strings()]
+    sessions = session_prefixes()
+    if sessions:
+        patterns.append(re.compile(r"(?<![0-9a-f])(?:" + "|".join(sorted(sessions)) + r")(?![0-9a-f])"))
     return patterns + [_word(name) for name in project_placeholders()]
 
 
 CAPSULE_PREFIX = 16
 WINDOW = 16
+_SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def session_prefixes() -> set[str]:
+    """The first eight characters of every session this machine knows, as
+    reports and notes quote them (a whole id starts with them): the memory
+    store's capsule folders, and the Claude and Codex transcripts' names. A
+    real one had been left in a test (designer 2026-10-28)."""
+    from agent_memory.replay import default_claude_dirs, default_codex_dir
+    from agent_memory.storage import memory_home
+
+    names = []
+    folders = [(memory_home() / "sessions" / "by-session", False), *((Path(folder), True) for folder in default_claude_dirs()),
+               (Path(default_codex_dir()), True)]
+    for folder, deep in folders:
+        try:
+            names += [path.name for path in (folder.rglob("*") if deep else folder.iterdir())]
+        except OSError:
+            continue
+    return {match.group(0)[:8] for name in names for match in _SESSION_ID.finditer(name)}
 
 
 def golden_texts() -> list[str]:
@@ -144,11 +210,24 @@ def golden_texts() -> list[str]:
     return [str(query.get("text", "")) for query in golden.get("query", []) if isinstance(query, dict)]
 
 
+def probe_texts() -> list[str]:
+    """The probe questions (doctor/probes.toml), the user's own words as
+    the golden ones are."""
+    from agent_memory.federation import parse_minimal_toml
+    from agent_memory.storage import config_home
+
+    try:
+        probes = parse_minimal_toml((config_home() / "doctor" / "probes.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(probe.get("text", "")) for probe in probes.get("probe", []) if isinstance(probe, dict)]
+
+
 def golden_windows() -> set[str]:
-    """Every WINDOW-character stretch of every golden query: a line that
-    quotes part of the user's own words is caught too, not only the whole
-    sentence."""
-    return {text[i:i + WINDOW] for text in golden_texts() for i in range(len(text) - WINDOW + 1)}
+    """Every WINDOW-character stretch of every golden and probe query: a
+    line that quotes part of the user's own words is caught too, not only
+    the whole sentence."""
+    return {text[i:i + WINDOW] for text in [*golden_texts(), *probe_texts()] for i in range(len(text) - WINDOW + 1)}
 
 
 def ledger_strings() -> set[str]:
@@ -173,7 +252,11 @@ def ledger_strings() -> set[str]:
         match = re.search(r"^- active_task: (.+)$", text, re.M)
         if match:
             found.add(match.group(1).strip()[:CAPSULE_PREFIX])
-    return {item for item in found if len(item.strip()) >= 8}
+    # A short probe query in Chinese is the user's sentence, however short;
+    # one in English alone is a tool's name (deploy, TestFlight), common in
+    # the code.
+    probes = {text for text in probe_texts() if len(text) < WINDOW and re.search(r"[\u3400-\u9fff]", text)}
+    return {item for item in found if len(item.strip()) >= 8} | {text for text in probes if len(text.strip()) >= 4}
 
 
 def _clear(out: Path) -> None:
@@ -268,7 +351,7 @@ def scan(out: Path) -> list[str]:
                 if pattern.search(line):
                     problems.append(f"{relative}:{number}: key-shaped string")
             if any(line[i:i + WINDOW] in windows for i in range(len(line) - WINDOW + 1)):
-                problems.append(f"{relative}:{number}: quotes {WINDOW} characters of a golden query")
+                problems.append(f"{relative}:{number}: quotes {WINDOW} characters of a golden or probe query")
     return problems
 
 

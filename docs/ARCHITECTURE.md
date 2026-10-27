@@ -204,16 +204,36 @@ Preference 只輸出單行 `stable-id: value`；不重複 kind、scope、source 
 空 query 或只有 stopwords 的 query 不再退化成 scope-default retrieval。
 
 Session budget 是 adaptive，沒有軟目標：先嘗試完整 capsule、全部 preferences
-與 lifecycle 允許的 task summaries；超過 2800 才依序移除其他 tasks、再按
+與 lifecycle 允許的 task summaries；超過 agent 的開場預算（Codex 3400，Claude Code 5000）才依序移除其他 tasks、再按
 critical/high/normal/low 與 stable ID 保留可完整容納的 priority prefix。較高優先項目若放不下，
 不讓後面的較低優先項目越過它。6000-byte capsule 優先；
 若 capsule 本身異常超過安全上限，hook 靜默 fail-open。v3.1 曾依當時實測的 821 tokens
-訂過 1000 的軟目標；沒有證據顯示 1000 是最佳值，v4.1 已退役，pack 只受 2800 hard limit
+設過一個 1000 的軟目標，這個數字從來沒有驗證過；v4.1 已拿掉，pack 只受開場預算這個 hard limit
 與各區塊自己的上限約束。
 
 ### 4. Session state
 
 每個 stable session 一個 `sessions/by-session/<safe-id>/HOT.md`，最多 6000 UTF-8 bytes。
+超過 4800 bytes（八成）時 checkpoint 會警告；超過上限時，resume_point 依換行或「；」切成事件（新事件接在
+後面，最舊的先丟；引號、反引號裡或路徑中間的「；」不切，第二份審查 6、7），
+從最舊的開始丟（只丟上一版已經有的事件，這次新寫的一律保留；舊版在 git 裡），最後一件絕不丟：
+丟到只剩一件還是超過就報錯，存好的膠囊不動（實際使用回饋改善 F10；第二份審查 2）。`memoryctl checkpoint --set 欄位=值`（可多個）與 `--show` 直接改、印存好的膠囊，
+不需要外部檔；缺欄位時一次列出全部，並附 `memoryctl template checkpoint` 的骨架。膠囊可帶任務表
+（騰訊借鏡改善 T5）：`tasks` 每項有 id、80 字內的 title、todo／doing／waiting／done、選填的 waiting_on，
+updated_at 在那一項有變動時自動填；寫成 `- tasks:` 下一項一行（`  - [doing] PR-3：標題（等：誰） · 時間`），
+SessionStart 照膠囊原文印出；done 只留最近變動的 3 筆；`--set tasks.PR-3.status=done` 改單一項、
+`--set tasks.PR-3=` 刪一項；只有 `--set` 時在寫入鎖裡讀膠囊再改，兩個同時跑都會留下（第二份審查 8）。`--input` 沒有 tasks 這個鍵時沿用上一版的任務表（合併前就在跑的
+session 照舊寫法存膠囊，不會清掉），明確給 `[]` 才清空（第二份審查 3）。沒有 tasks 的膠囊，內容和
+以前逐位元組相同。一份 5,763 bytes 的
+膠囊在副本上改用任務表寫，變成 2,925 bytes。
+有到期時間的待辦（騰訊借鏡改善 T4）：task 可帶 `due`（含時區）與 `status`（open／done，存成 metadata 的
+`task_status`，因為 `status` 是紀錄本身是否 active）。SessionStart 不論路由開關，列出這個 cwd 看得到的 open task 中
+到期在「7 天前到 24 小時後」的，最多 3 筆、越早到期越前面（`## DUE TASKS`）；`project:<p>` 的只在 cwd 屬於那個專案時
+出現，其餘到處出現。裁切時比 PROJECT LESSONS 晚、比偏好前綴早。路由開啟時，使用者親自打的回合若有 open task 是在這個
+session 上一次 SessionStart 之後才到期的，最前面加一行「到期：<id> <一句摘要>」，每筆每個 session 一次（記在 F2 的
+已給清單，標記 `due:<id>`）；SessionStart 的時間記在 `runtime/userprompt/<session>/started.json`。沒有到期待辦時，
+兩個 hook 的輸出逐位元組不變。`memoryctl task done <id>` 寫成新版本（status done，舊版進 archive）。doctor 的「過期的
+待辦」列出過期超過 7 天、還是 open 的。T4 不是鬧鐘：要有回合進來才看得到。
 Selection 規則：
 
 1. 有 exact session ID 時只用 exact capsule 當 current task。
@@ -234,10 +254,10 @@ Selection 規則：
 
 Codex 與 Claude Code adapter 都只安裝三個 events：
 
-- `SessionStart`：matcher 是 `startup|resume|clear|compact`；內部 hard limit 2800，Codex `additionalContextLimit` 3000。後者依
+- `SessionStart`：matcher 是 `startup|resume|clear|compact`；內部 hard limit 3400（Codex），Codex `additionalContextLimit` 3600。後者依
   [官方 hook config 實作](https://github.com/openai/codex/blob/main/codex-rs/config/src/hook_config.rs)
   是 approximate-token spill-to-disk threshold，不是內容截斷上限；真正的選入邊界由內部
-  2800 控制。
+  3400 控制。
 - `UserPromptSubmit`：prompt-aware pack 上限 1800；不包含 session capsules。
 - `PreCompact`：matcher 是 `manual|auto`，只寫 local marker。
 
@@ -317,6 +337,10 @@ Audit 是 read-only。它不做 policy decision、不推測 outcome 因果，也
 - 每筆摘錄都被截到約 400 字元（`_bounded_excerpt`）。第一版沒有做這件事，結果幾筆超長
   的 ADR／settlement 原文吃光了整個 query 的 token budget，把其他候選擠出去——這不是
   「檢索不到」的錯誤，是「有東西被靜默擠掉」的錯誤，比前者更難發現。
+- 注入時聯邦條目只顯示指標：值最多 80 token，加上 `- read:` 路徑。路由版（實際使用回饋改善 F6）讓值在句尾結束：專案的 ADR 只顯示 Decision 段第一句（第一句不到 25 字時連下一句一起，「**不改。」這種說不出決定了什麼）；其他條目取 80 token 內完整的句子，被截過的摘錄不顯示到斷掉的地方；清單的編號（1. 12.、「「1.」「：1.」）與 e.g.、i.e. 不算句尾；切斷的 ** 粗體補上收尾（檢索審查 3）；完整句子不到上限的五分之二（下一句太長）時照舊硬切。索引裡的摘錄與關掉路由時的輸出都不變。
+- 會過時的文件（例如 brief）可以在 parser 設 `half_life_days`（markdown-note 與 adr；整數天數，實際使用回饋改善 F7）。建索引時一次 git log 取得每個檔案在來源讀的 commit（ref 或 HEAD）上最後一次被 commit 的時間，記在條目上；路由版的分數乘 0.5^(天數／半衰期)，explain 會寫「N 天前的檔案 ×係數」。舊檔分數變小，有較新的候選時會低於節點的相對下限而被擠掉；它是唯一命中時照樣出現。沒 commit 過的檔案不衰減；關掉路由時的輸出不變。
+- 帳本決策與專案自己的決策紀錄（實際使用回饋改善 F8）：ADR 與決策日誌（heading_level 3）的條目標成專案決策紀錄，附上出現的時間（ADR 是檔案第一次被加入的 commit；日誌條目是 `###` 標題自己寫的日期，沒有的話是寫下那行標題的 commit（git blame，一個檔一次），再沒有才用上方 `##` 標題的日期——一個專案的日誌只有兩個 `##`，95 條原本都是 09-30 或 10-01；檢索審查 6）。和帳本決策比先後時兩邊都用含時區的完整時間（原本一邊是 UTC 的日子、一邊是當地的；只有日期的當成當地那天的開始），一個日誌檔只讀一次（審查 7，reindex 原本多 2.2 秒）。建索引時（以及寫入決策之後）找出同一專案裡、在帳本決策 updated_at 之後才出現、用字相似的專案紀錄：至少 5 個少於 rare_share（且少於 rare_min_docs）筆紀錄有的詞，而且占較短一方的兩成以上；每筆帳本決策最多記 2 筆，寫在 `.cache/newer_decisions.json`。路由版注入那筆帳本決策時加一行「專案決策紀錄有較新的：<id>（日期）」，hook 只查表；doctor 第五節列出這些決策並建議 supersede 成指向專案紀錄或退役。2026-10-21 的帳本副本上有 7 筆，逐一看過都是同一個決定在專案那邊的紀錄。關掉路由時的輸出不變。
+- 紀錄連到當時的 commit（騰訊借鏡改善 T6）：post-commit hook 在做那次 commit 的 worktree 根目錄、帶著提交者的環境跑 `memoryctl sources sync`。sync 在抓 origin 之前（抓取最多 10 秒，卡住也不會漏記），在工作目錄的 repo 和來源的 repo 共用同一個 git common dir（本身或它的 worktree）時，在 `runtime/commits.jsonl` 為每個 commit 加一行（session id——`current_session_id`：Claude 的 `CLAUDE_CODE_SESSION_ID`、Codex 的 `CODEX_THREAD_ID` 等——、來源名稱、commit hash、時間；加鎖寫入）。hook 在背景跑，sync 讀的時候 HEAD 可能已經被下一個 commit 或 checkout 移走，所以不看 HEAD，而是讀那個 worktree 的 HEAD reflog：60 秒內、不晚於這次 sync 開始（reflog 只到秒，寬限 1 秒）的每一筆 commit／commit (amend)／commit (merge)，還沒記過的都記；amend 把被它換掉的那個 hash 從紀錄拿掉（第二份審查 4）。不存 diff 或 commit 訊息；使用者在終端機自己做的 commit 沒有 session id，記成沒有 session（session id 空白，誰的清單都不列），免得一分鐘內另一個 session 的 sync 把它算成自己的；兩個 session 在同一個 worktree、同一秒內 commit 分不出來。手動 sync 時最近的 commit 超過 60 秒，不記。記錄失敗不影響 commit。doctor 清掉一年以前的。`memoryctl search --id <id> --context` 依 learned_in 的 session 列出「這個 session 做過的 commit」（來源、短 hash、顯示時才用 `git log -1` 讀的標題；讀不到就只列 hash）。五個 repo 的 hook 檔不用改。
 - 觸發完全是明確的：`memoryctl sources sync <name>` 手動，或
   `memoryctl sources install-hook <name>` 在該 repo 的 `.git/hooks/post-commit` 加一行
   （唯一允許碰觸的路徑，且不受版控）。Hook 本身用 `( ... & ) || true` 背景執行，永遠
@@ -363,7 +387,7 @@ repo 內時，不論 prompt 詞彙為何，都會附上該 repo 最多 5 筆 ope
 orientation；截斷按估計 token 而不是字元（每筆 ≤60、整區 ≤400，CJK 一字一 token）（例如「此 repo 有
 CONTEXT.md、18 docs/adr、5 reports/settlements；寫報告前先讀」）。這跟 preferences 在
 SessionStart 無條件載入是同一類機制。Trim 順序是 capsule > preferences > lessons > other tasks：其他 session 的摘要最先被砍，PROJECT
-LESSONS 留到最後（Codex 的 2800 預算下，舊順序曾讓聯邦專案裡的 Codex 完全看不到專案教訓）。
+LESSONS 留到最後（Codex 當時 2800 的預算下，舊順序曾讓聯邦專案裡的 Codex 完全看不到專案教訓）。
 
 接上 UserPromptSubmit 時抓到一個真的會出問題的 bug：hook 用「SOURCE IDS 是否為空」判斷
 要不要靜默——如果 lessons 只加進 header、不加進 SOURCE IDS，遇到一個跟任何 canonical
@@ -379,8 +403,13 @@ record 都沒有字面重疊的 query，PROJECT LESSONS 就會被整個吞掉，
 assistant 回覆之前的 UserPromptSubmit 注入。抽 10 則有注入的（依 session 輪流抽，避免單一
 session 佔滿）加 2 則沒注入且至少 20 字的，同一則四週內不重抽。終端機一次一題：有注入的印
 訊息、session 名稱與每筆注入紀錄的 id 和一行 value，問有用／沒用／礙事；沒注入的問「沒差」
-或「它應該記得某件事」。結果存在 `~/.config/agent-memory/ratings/<ISO 週>.json`（檔案權限
-600），每題只留 80 字摘錄。`--summary` 印本週與前四週的有用率、礙事率，並列出被標
+或「它應該記得某件事」。`d`（記憶全文：依 kind 印主要段落，查找順序同 `search --id`，
+總長 3000 字）、`r`（AI 回答的前 800 字與逐筆是否引用）、`m`（訊息全文）只看不答。AI 回答
+在串流讀對話紀錄時順便留下（每則最多 4000 字，只取 assistant 的文字），不另外重讀。逐筆分三種：
+回答文字裡寫了「依據 <id>」、id 只出現在這一輪其他 assistant 內容（例如工具呼叫）、沒提到；
+doctor 的引用率把前兩種都算作引用，定義不變。每答一題就存一次，Ctrl+C／EOF
+時保留已答的題目。結果存在 `~/.config/agent-memory/ratings/<ISO 週>.json`（檔案權限
+600），每題只留 80 字摘錄；看過的內容與 AI 回答都不存。`--summary` 印本週與前四週的有用率、礙事率，並列出被標
 「沒用／礙事」三次以上的紀錄；只列出，不會自動改任何優先度。
 
 ### 每週健康檢查：`memoryctl doctor`
@@ -426,6 +455,273 @@ session 佔滿）加 2 則沒注入且至少 20 字的，同一則四週內不�
 `MEMORYCTL_DOCTOR_CAPPED=1` 標記，避免跳出 service 的 cgroup）；沒有 systemd-run 時退回
 `RLIMIT_AS` 3 GB（它限虛擬記憶體，當機那次 2.9 GB 虛擬對應 1.98 GB 常駐），碰到
 `MemoryError` 就略過讀紀錄的訊號。
+
+### 從論文借來的改善（論文借鏡改善 v1，2026-10-18）
+
+六項借自 2026 年的記憶論文（對照見參考資料），都只讀帳本、寫衍生檔或建議，不自動改紀錄；
+hook 照舊 fail-open、不連網、不重建索引，router.enabled=false 的輸出不變。
+
+- **回饋排序（A1，`agent_memory/feedback.py`）。** 從近 8 週評分與近 4 週週報的逐筆注入／
+  引用次數算出 `~/.config/agent-memory/runtime/feedback.json`（機器本地的衍生檔；`memoryctl
+  rate` 存檔後與每週 doctor 重算；不存在或壞掉就當作沒有回饋）。評分針對的是整個 Context
+  Pack，所以「有用」「礙事」只記給回答裡寫了「依據 <id>」的紀錄，包裡只有一筆時記給那筆，
+  其餘記為無法歸屬；「沒用」記給包裡每一筆。存引用之前的舊評分，從那一輪的對話紀錄串流重算
+  一次，快取在 `runtime/rating_citations.json`。routed UserPromptSubmit 在各節點的相關性門檻
+  之後才調分：礙事 ≥2 且多於有用 ×0.5；有用 ≥2 且沒有礙事，或近 4 週被引用 ≥3 次 ×1.15。
+  所以回饋不能把門檻外的紀錄帶進來；`--explain` 標「回饋：降／升／無」與原因。PreToolUse
+  不套用；golden 一律在不套用回饋下跑。doctor 第四節列礙事 ≥2 的紀錄與無法歸屬的次數。
+- **學到時的對話（A2，`agent_memory/learned.py`）。** record／supersede 在 metadata 加
+  `learned_in: {session_id, at}`（拿不到 session id 就不加；supersede 換成這一版的寫入者）。
+  舊紀錄由 `memoryctl learned-in backfill` 從對話紀錄的 `Recorded <id>`／`Superseded <id>
+  version N` 工具輸出找回，只算帳本該版寫入時間後 10 分鐘內的（避免把在副本上試跑的同 id
+  寫入當成真的），存在衍生快取 `.cache/learned_in.json`；每週 doctor 只重讀 mtime 或大小變了
+  的檔。`memoryctl search --id <id> --context` 照它找到那個 session，串流印出寫入前最近一則
+  訊息（標明來源：使用者、其他 session（名稱）或子代理回報，以及時間差）和之後的 AI 回覆，
+  各最多 1000 字，不印工具呼叫。`memoryctl rate` 的 d 畫面附上這個指令。
+- **事實的有效期間（A3）。** fact 的選填 `valid_from`／`valid_until`（YYYY-MM-DD）表示現實
+  中何時成立，和 created_at／updated_at（系統何時知道）、expires_at（多久要重新查證）分開；
+  validate 檢查格式與先後。注入時 value 後加「（自 <日期> 起）」；valid_until 已過的不注入
+  （平面流程與路由的 facts 節點都一樣），search 仍找得到並標「已於 <日期> 不再成立」。
+  `memoryctl search --as-of <日期>` 用目前版本與 archive 的舊版本列出那天成立的事實：兩個
+  欄位都沒有時從寫入那天起算；只有 valid_until 時起點不限；沒有 valid_until 的舊版本成立到
+  下一版的前一天。
+- **合併草稿（A4，`agent_memory/merge_drafts.py`）。** doctor 把「可能跨專案的教訓」的配對
+  分組：兩兩都有配對才同組，從最強的配對開始（明文互指優先），每筆只進一組。每組在報告
+  資料夾寫 `<日期>-merge-drafts/<序號>-<名稱>/`：`members.md`（主要段落並排）、
+  `general.json`（通用版骨架，文字欄位是「請改寫：」加成員原文）、每個成員的
+  `supersede-<id>.json`（applies=origin、修法開頭「通用教訓見 <id>。」）與 `README.md`
+  （審閱步驟和依序要執行的指令）。doctor 不執行任何 record／supersede。
+  - 已併入的紀錄（applies=origin 且內文寫「通用教訓見 <id>」）代表它的通用教訓：它的配對
+    轉給通用教訓（週報標「經由已併入的 <id>」），它自己不和通用教訓、也不和併入同一筆的
+    紀錄配對。已有紀錄併入的通用教訓先自成一組、以它為中心：凡是和它有配對（直接或經由
+    已併入的紀錄）且還沒進別組的紀錄都收進來，不要求候選彼此配對，因為審閱時是一筆一筆
+    判斷；被最多紀錄併入的通用教訓先分，剩下的配對才照上面的方式分組。這種組產生「加入
+    既有通用教訓」的草稿：通用教訓本身的 supersede 補上 evidence 與 origin，並明確保留
+    applies（supersede 會丟掉 payload 沒帶的 applies），每個候選的 supersede 指向它。
+  - `memoryctl doctor dismiss <id> <id> …` 把「這幾筆不是同一個教訓」記在
+    `runtime/doctor/dismissed.json`（機器本地）。成員全在同一次 dismiss 集合裡的組不再產生，
+    週報寫「已排除 N 組」；有新成員加入時那組會再出現。`dismiss <通用教訓> <候選>` 只把那個
+    候選排除在這組之外，其他候選照常（週報寫「已排除 N 筆加入既有通用教訓的候選」）；
+    README 為每個候選各列一行 dismiss 指令。
+  - origin 列出每個成員的 origin（含 machine:<id>）。成員推不出專案時，用寫入第一版的
+    session（learned_in 或回填快取裡版本最小的）在對話紀錄中寫入那一刻的 cwd，經
+    PreToolUse 同一張 cwd→專案表補上，README 標「由學到時的對話推得」。草稿在 learned_in
+    回填之後產生；可用記憶體不足、不讀對話紀錄時照樣產生，只是不推專案。
+- **可能漏記的時刻（騰訊借鏡改善 T1，只量測）。** 週報第六節。用 F16 的紀錄讀取器（`results=True` 時另外給出 Bash 與 AskUserQuestion 呼叫的結果；只解析這些呼叫的結果行）數三種訊號：使用者回答了 AskUserQuestion；使用者親自打的回合（照 F1 分類）出現規則用語（`doctor/missed.toml` 的 `rule_words`，預設 以後、不要再、記得、記住、改成、always、never、from now on、remember；英文以詞為單位）；同一 session 裡一個 shell 指令失敗、10 分鐘內前兩個詞相同的指令成功（先去掉開頭的 `cd <目錄> &&`）。失敗看 Claude 的 `is_error`、Codex 包裝在輸出開頭寫的 exit code（`Exit code: N`／`Process exited with code N`，在 `Output:` 之前），不從指令輸出的文字猜。訊號之後 30 分鐘內同一 session 有新紀錄或 supersede（learned_in，含回填快取）才算有記，只更新膠囊不算。週報列每種訊號的次數與有記比例（依專案），以及最多 20 個沒記的位置（session 前 8 碼、時間、種類）；週報與快取都不存說過或跑過的內容。2026-10-21 跑這週 104 份紀錄 14 秒、峰值 38 MB。
+- **可能需要改程式的地方（A5）。** 週報第五節，給設計者看，每項附建議動作：golden 失敗的
+  題目與原因；危險清單某一項擋了 ≥3 次且 ≥80% 照原指令重跑放行（可能誤擋）；注入最多次卻
+  從沒被引用的前 5 筆；AI 在一輪裡自己跑 `memoryctl search` 的次數，依那一輪 Context Pack
+  的來源節點計（沒有注入記為「沒有注入」），代表路由可能漏了；被標礙事的筆數。要改的由
+  設計者寫成規格，doctor 不自己改程式。
+- **向量配對與主題建議（B1，`agent_memory/semantic_doctor.py`）。** 只在每週 doctor 裡用本機
+  模型（paraphrase-multilingual-MiniLM-L12-v2，`memoryctl semantic setup` 下載並驗證到
+  `.cache/semantic/model`）。doctor 本身不載入 numpy／onnxruntime，而是用另一個有 semantic
+  extra 的直譯器開子行程（`AGENT_MEMORY_SEMANTIC_PYTHON`，預設
+  `~/.local/share/agent-memory/semantic-venv/bin/python`；系統 Python 不能裝套件時用 uv 建的
+  Python 3.12 環境）。子行程在 doctor 的同一個記憶體上限裡，每筆紀錄的主要段落各自截到
+  128 token 算向量再平均，回傳 cosine 達門檻的配對與自己的峰值記憶體；週報第一節把 doctor
+  與子行程的峰值並列。用途有二：
+  - 用字沒抓到、cosine ≥ 0.75 的跨專案配對（每週最多 10 對，最強的先）照一般配對進
+    「可能跨專案的教訓」與合併草稿，標「語意相似 x（用字 y）」。門檻來自 live 帳本：用字找到
+    的真配對落在 0.71～0.91，雜訊配對在 0.46～0.57。
+  - 主題詞找不到的知識紀錄（在 knowledge/misc，或所在主題的名稱與詞照路由的比對規則都
+    不出現在內文）以 cosine ≥ 0.6、兩兩相似分群；每群建議主題（成員已在的主題優先）與
+    觸發詞（至少兩筆共有、在整份帳本裡不常見的詞；日常英文與每筆軟體紀錄都會用的字不算，例如 variable、runtime、fact；中文長詞的後半段也不算——在整份帳本裡，一個雙字從來不出現在一段中文的開頭（前面沒有標點、空白、英數字或虛字），而且八成以上的出現位置前面都是同一個中文字，例如「分割區」的「割區」、「出分後」的「分後」；「系統」雖然在成員裡多半接在「記憶」後面，別處單獨出現，仍是詞（實際使用回饋改善 F15；虛字用 router.toml 的 `[relevance] function_chars`，不另列一份，檢索審查）），寫在第五節，提醒 router.toml 的
+    `[[knowledge.topic]]` 會取代內建清單。
+  沒有環境、沒有模型、可用記憶體不足 1200 MB、或子行程失敗時，週報寫明略過的原因，其餘
+  照常；刪掉那兩個資料夾即可移除。hook 不碰模型，semantic 檢索的啟用門檻也不變。
+
+### 整個 session 的注入量：重放與每週指標（實際使用回饋改善 F16，2026-10-21）
+
+單輪的 golden 量不到只在長 session、多種訊息來源下才出現的浪費（同事訊息與通知也觸發完整
+注入、同一條教訓幾百輪重複）。`agent_memory/replay.py` 逐行串流讀對話紀錄（先用字串篩行，
+3.7 GB 約 15 秒、RSS 約 50 MB），整理成 hook 看到的事件與 agent 寫出的內容：UserPromptSubmit
+的觸發（使用者打的字、同事訊息、子代理與背景工作回報、usage 重置、排程提醒、只有圖片；工作中
+排隊送進來的也算）、shell 工具呼叫、SessionStart（含來源）與壓縮、紀錄下的注入包（只認標題
+`# Durable Memory Context Pack` 與 `## FOR THIS COMMAND`：Claude 的 attachment、PreToolUse 的
+hook stdout、Codex 的 developer 訊息），以及 agent 的文字與工具輸入。
+
+紀錄和 hook 實際收到的不一樣的地方，以重放吻合率逐一查證後照 hook 的方式還原：
+- 一起送達的訊息（排隊後一次送出）是一個回合：紀錄裡每則一行，hook 只觸發一次，prompt 是
+  最後一則。
+- 同事訊息與子代理回報，紀錄裡前面多一行「Another Claude session sent a message:」、後面多一段
+  給 agent 的說明；hook 收到的是訊息本身（到結束標籤為止）。
+- 子代理的回報已送達後，同一個子代理的完成通知被當成重複丟掉，不觸發 hook。
+- 平行的工具呼叫，PreToolUse 的輸出依 toolUseID 對應。
+- 只算時間落在期間內的事件；長 session 的檔案裡也有更早的事件。
+
+五個數字（`Measure`）：每個 session 的注入字數（UPS、PreToolUse、SessionStart 分開列，也都算進
+總數）、同一筆在 session 內重複完整注入的次數（另列壓縮後重新給的）、UPS 注入發生在非使用者回合
+的比例（依紀錄的來源分類）、專案紀錄注入到別的專案的比例（紀錄的所屬對 cwd 所在專案；所屬看
+scope 的 project:<p>，或 id 的領域詞對到某個專案的詞（專案從 machine.json 的 scope_paths、來源與帳本的 project scope 推得），所以放在 facts、rules 的
+專案紀錄也算）、使用率（注入後到
+下一則使用者訊息之間，agent 的輸出寫了 id，或重複了那筆特有的內容：兩段以上的路徑、commit
+hash、帶小數或單位的數字、反引號程式片段、8 字中文或 4 個英文字的原文；特有＝只有少數紀錄有，
+且不在那段期間的任何 prompt 裡，判斷規則 v1）。
+
+- 每週 doctor 第二節用這週紀錄裡實際的注入算這五個數字，和上週並列，寫出讀了幾份紀錄、幾個
+  session（Claude、Codex 分開；有內容卻一行都認不出來的檔寫「讀不到」，資料夾不存在也寫出來；
+  workflow 的 journal 不是對話紀錄，不讀），以及這週 live 用的程式版本：期間開始時那一版和期間
+  內換過的每一版（本機時間與 commit）。報告與任何快取只放數字與紀錄 id，不放使用者或 agent 的
+  原文。
+- 預設讀 ~/.claude/projects 和 ~/.claude-profiles/*/projects，同一個實際檔案只讀一次。紀錄是
+  緊湊 JSON；冒號後面多一個空格的檔也照樣讀。子代理回報送達後，重複的完成通知不論記成排隊或
+  user 行都丟掉。`--home` 指定的帳本，用它自己的專案路徑表判斷 cwd 屬於哪個專案。重放與吻合率
+  被 SIGTERM、SIGHUP 中止時也會清掉暫存副本。
+- `memoryctl replay --code <程式樹>` 把同一批事件交給指定的程式樹，在帳本與設定的副本上重放
+  （副本不含任何 session 的 runtime 狀態），和紀錄裡實際的注入並列比較；事件經管線傳給重放的
+  子程序，不寫到磁碟。改前改後的驗收都用它。
+- `memoryctl replay --fidelity N` 分層抽 N 個事件（各專案、各種回合），用帳本的 git 歷史取出
+  事件當時的程式與紀錄重建索引後重放，和紀錄比對。每個事件單獨重放，當成它那個 session 的第一個
+  事件；比帳本最新 commit 還晚的事件不抽（副本可能沒有那時的版本）。每一筆不同都要歸到已知原因，
+  而且原因要自己證明成立：
+  - feedback.json：不帶它重放就和紀錄相同；
+  - 聯邦來源：差別全是聯邦紀錄，而且來源在事件之後改過（讀 ref 的來源看那個 ref 在事件之後移動
+    過或有更新的 commit，讀工作目錄的看更新的 commit 或解析的檔案）；
+  - PreToolUse 去重：重放多出的是同一個 session、同一個代理先前給過的（壓縮不會清掉）；
+  - F2 已給過：重放多出的全列在紀錄那包的「先前已提供」裡；
+  - 放行狀態：重放擋下、紀錄放行，而且同一個 session、同一個代理稍早被同一個減速帶擋過。擋下
+    只記在被擋那次呼叫的 tool_result（「PreToolUse:Bash hook error: …」），不在 hook attachment；
+  - 依日期的規則（到期日、有效期限落在事件和現在之間）、工作目錄已不存在。
+  設定檔在事件之後改過的另外列成「未驗證」，不算解釋；歸不了因的算重放工具的錯。一起送達的
+  訊息，hook 收到的是時間最晚的那一則（紀錄裡的先後不一定是時間先後）。
+
+### 不是使用者打的回合、同一 session 不重複（實際使用回饋改善 F1、F2，2026-10-21）
+
+UserPromptSubmit 不只在使用者打字時觸發：其他 session 的訊息、子代理與背景工作的回報、usage
+重置通知、只有圖片的回合也會觸發。重放近 7 天的紀錄，九成的 UPS 注入都在這種回合，另外同一條
+專案教訓在一個 session 裡重複注入幾百次。router 開啟時（關閉時的平面流程逐位元組不變）：
+
+- hook 依 prompt 開頭的標記判斷回合（`agent_memory/turns.py`）。系統通知
+  （`[SYSTEM NOTIFICATION`、usage 重置）與只有圖片佔位的回合不注入。其他 session 的訊息
+  （`<cross-session-message`、`<agent-message`、或前面的 "Another Claude session sent a
+  message"）與子代理、背景工作的回報（`[Subagent hand-back]`、`<task-notification>`）給精簡版：
+  只開 cwd 所在專案的節點（不開點名的第二專案、主題知識、facts、依詞命中的偏好、點名的
+  failure），每個節點的 token 與筆數上限減半，PROJECT LESSONS 只在 cwd 真的屬於那個專案時給，
+  查詢只用訊息本文（不含外層標籤、地址與給 agent 的說明，那段說明的 permission、settings、
+  config 等詞會帶進不相干的紀錄）。排程提醒沒有這些標記，照使用者回合處理。
+- 每個 session 在 `runtime/userprompt/<session>/given.json` 記下已完整給過的紀錄 id、
+  PROJECT LESSONS 條目，以及 PROJECT LESSONS 區塊裡非教訓的那幾行（orientation、索引位置的
+  提示）的雜湊；只存 id 與雜湊，不存 prompt。之後再命中時，紀錄改列在「先前已提供（本 session
+  已給過全文；看全文：memoryctl search --id <id>）」一節，佔筆數但不佔 token；整包只剩這一節
+  也照樣注入。SessionStart 給過的 PROJECT LESSONS 也記下，所以第一則 prompt 就只列 id。
+  PreCompact，以及 SessionStart 的 compact、resume、clear 時清掉清單，壓縮後重新給全文。
+  14 天沒動的 session 資料夾在建立新資料夾時順手清掉。
+
+### 相關性下限、偏好的標題、只剩指標的紀錄（實際使用回饋改善 F3～F5，2026-10-21）
+
+- routed 路徑的紀錄，除了原本的兩詞下限，還要在扣掉加分之後命中 min(2, prompt 的有意義詞數)
+  個有意義的詞。global 的紀錄和主座專案的紀錄這樣就夠（股票代號在投資專案、「截圖」在 app 專案
+  是常見詞，不能要求它們不常見；設計者 V1 裁示）；其他紀錄還要其中至少一個不常見。主座
+  是 cwd 所在的專案，cwd 不在任何專案時是 prompt 點名的那個：從 ~ 問某個 app 的上架截圖，
+  原本只剩另一個專案的在地化紀錄，現在帶出上架與截圖流程的紀錄（檢索審查 1）。cwd 所屬專案每一輪只算一次。
+  含虛字的中文雙字詞（的記、在的）是切出來的殘片，不算詞；同一段中文切出來的重疊雙字詞，紀錄裡也連在
+  一起出現時合成一段，一段每兩個字算一個詞（「使用者」1 個、「躲在主城裡」2 個；分開出現的照舊各算 1 個；
+  prompt 的有意義詞紀錄全部都有的照樣算過）。2026-10-21 量 120 句：10 句的包有變，拿掉的 19 筆都是一個詞
+  被切成兩個雙字詞才過下限的（設計者裁示）；
+  虛字清單在 router.toml `[relevance] function_chars`（預設「的了是在嗎呢吧啊喔呀著和與及或而並
+  就也都很把被這那」），英文虛詞本來就是查詢停用詞。出現在少於 5% 紀錄裡（`rare_share`），或在
+  小帳本裡少於 5 筆（`rare_min_docs`）的詞算不常見；文件數每一輪用全文索引的 fts5vocab 一次查出
+  （約 3 毫秒），被斷詞拆開的詞（app.toml）取最少見的那一段。cwd 在已註冊專案時，屬於其他專案
+  或 workspace、而 prompt 沒點名那個專案的紀錄，不常見的詞要命中同樣個數。決策帶出的證據、
+  靠實體詞開啟的 fact、點名的 failure 不受這道下限影響。
+- 對話用語不是主題：routed 路徑在算詞之前先把 router.toml `[relevance] filler_words` 裡的詞從
+  prompt 拿掉（預設「繼續、好的、好喔、可以、謝謝、收到、沒問題、了解、知道了、是的、ok、okay、
+  thanks、thank you」；檔案裡的清單取代預設），所以只打「繼續」不帶任何紀錄，「繼續用 podman」
+  只剩 podman 一個詞。只收兩個字以上的詞（「好」「對」是好處、對手的一部分）；英文詞要前後都不
+  連著英數字、`-`、`_`、`/` 或 `.` 加英數字，ok-button、ok.txt 不受影響。2026-10-21 一個專案的
+  探測問句「繼續」原本帶出三筆無關的紀錄（設計者裁示）。平面流程不變。
+- 同分時先比全文索引的 bm25（文字比較貼近的先），再比新舊（新的先，F3(b)），最後比區塊長短。原本
+  只在沒有日期或日期相同時才比 bm25：golden「claude -a 登入帳號 a」的答案因此被前一天才記的另一筆同分
+  fact 擠掉（設計者 2026-10-21 改成所有同分都先比 bm25）。只有一個詞的 prompt 幾乎每筆都同分：「估值」原本把三個位置
+  給了區塊最短的三份 ADR，講估值的那份 ADR 排不進去（設計者 2026-10-21 裁示）。量過 120 句：第 1
+  筆沒有改變，有變的只在沒有日期的紀錄。
+- 每週 doctor 在 golden 旁邊跑一組固定的探測問句（`doctor/probes.toml` 的 `[[probe]]`）：每個
+  專案各有單一代號、該專案的常見主題詞、對話用語三類，每句寫出一定要出現（`expected_ids`）或
+  一定不能出現（`forbidden_ids`）的紀錄與一行理由（`reason`），檢查方式和 golden 相同；沒過的
+  在第一節列出問句與理由。答案不只一筆、排名會隨帳本變動的問句，把每一筆都寫進
+  `expected_any_ids`，出現其中任何一筆就算過（golden 也可以用）。`expected_ids` 與
+  `expected_any_ids` 只看 prompt 帶出的紀錄，不算 PROJECT LESSONS 區塊的 id（那些在專案裡每一輪都給，
+  不管問了什麼；檢索審查）；`forbidden_ids` 哪裡出現都算。`expected_mentions` 要帶出的紀錄裡至少一筆
+  的區塊含有那個詞（不分大小寫），用來檢查只打一個代號時 F3 沒有把東西全擋掉（設計者 2026-10-21）。
+  探測問句模擬的是 session 的第一個 prompt：PROJECT LESSONS 給全文，之後的回合照 F2 只列 id，預算會寬一些。
+
+- routed 包裡「NON-NEGOTIABLE CONSTRAINTS」只放使用者自己說的 critical、high 偏好；依 prompt
+  的詞命中的 normal、low 偏好放在「RELATED PREFERENCES（參考）」。平面流程的標題不變。
+- 主要段落（decision 的 Decision、fact 與偏好的 Value 等）以「Superseded by federation」開頭的
+  紀錄，只說它的決定已經移到某個專案的文件，本身沒有內容：routed 路徑不注入，search 照樣找得
+  到。每週 doctor 在第四節列出它們，並在報告資料夾 `<日期>-pointer-drafts/<id>/` 寫兩份
+  supersede 骨架讓人二選一：改寫成那份 ADR 的決定句（決定欄是「請改寫：」加原文），或保留原文
+  把 scope 改成它所屬的專案（從「in the <名稱> repo」對到來源，或從 id 的專案詞推）。
+
+### hook 輸出的長度上限、子代理回報的說明文字（F1、F2 審查 A、B、F，2026-10-21）
+
+Claude Code 收到超過 10,000 字元的 hook 內容時，會把它存成對話紀錄資料夾裡的檔案
+（`tool-results/hook-…-additionalContext.txt`），agent 只看到 `<persisted-output>`、路徑與前
+2,000 字的預覽，也不會被要求去讀那個檔。一個 session 的紀錄：10-19 兩份 10,467 字、10-20 一份
+10,075 字的開場包都被存成檔案，9,930 字的那份完整送到；10-07～10-09 另有 57 份 UPS 包（router
+上線前的平面流程產生的）。token 預算擋不住，因為英文一字只算 ¼ token。
+
+- Claude 的每個 hook 內容（SessionStart、UserPromptSubmit、PreToolUse）除了 token 預算，也不超過
+  9,500 字元（`CLAUDE_HOOK_CHAR_LIMIT`，以 Claude Code 的算法算 UTF-16 字元，留一點餘裕），照
+  既有的裁切順序裁：SessionStart 依「其他任務 → 候選摘要 → PROJECT LESSONS → 偏好前綴」，routed
+  的 UPS 依各節點讓出紀錄的順序（PROJECT LESSONS 最後），PreToolUse 放不下的那筆 failure 不給。
+  膠囊照舊整筆保留。
+- router 關閉時也一樣：平面流程的 PROJECT LESSONS 與每一筆紀錄都要同時放得下 token 預算與字元
+  上限才加進去。包只會越加越長，所以原本在上限內的輸出逐位元組不變；原本超過的照順序裁掉，那些
+  內容本來也送不到（設計者 2026-10-21 收窄的不變量）。
+- F2 只把實際印出的內容記成「已給過」；整包仍超過上限（只有膠囊本身就超過時才會）就什麼都不記。
+- 重放與每週 doctor 認得被存成檔案的包（`<persisted-output>` 或 "Output too large … Full output
+  saved to"，預覽裡有注入包的標題），算成「沒送到」：裡面的紀錄不算注入，doctor 第二節列出
+  SessionStart 與 UPS 各幾次；重放出來超過 10,000 字的 Claude 包也照這樣算。吻合率抽樣跳過這
+  種事件，因為只知道預覽。
+- 子代理的回報包在 `<agent-message>` 裡，`[Subagent hand-back]` 之後是 harness 給 agent 的說明，
+  到 "The report follows:" 為止，回報內文每行縮排兩格。精簡版只用回報內文（去掉說明與縮排）
+  查；紀錄把它記成同事訊息，指標記成子代理回報。
+- 比對 PROJECT LESSONS 條目是否給過時，id 要完整相符；一個 id 是另一個的開頭時不算同一筆。
+
+### 有沒有用到：系統判斷，不再請 AI 寫「依據」（實際使用回饋改善 F12，2026-10-21）
+
+- router 開啟時，UserPromptSubmit、SessionStart、PreToolUse 的注入不再有「採用某筆記憶時，請在回覆
+  寫一次「依據 <id>」。」那一行；router 關閉時的平面流程保留。
+- `agent_memory/usage.py`：一則注入之後到下一則使用者訊息之間，AI 說的話寫了那筆的 id（明寫 id），
+  或 AI 的輸出（文字回覆，以及工具呼叫的輸入）重複了那筆特有的內容（內容相符），就算用到。「說的話」
+  是文字回覆、SendMessage 與 AskUserQuestion 送出的內容；Write、Edit、Bash 的輸入裡的 id 不算明寫，
+  寫程式、寫測試時本來就會打出 id（規則 v5，A1 裁示 2026-10-21）。
+  - 特有的內容：三段以上斜線的路徑、commit hash、帶物理單位的量（312 ms、1.5 GB）、反引號裡不只
+    一個字的程式、8 字中文或 4 個英文字的原文片語。
+  - 只算少數紀錄才有、而且這段期間使用者寫的每一則訊息（整則，不論多長、一起送達的也都算）裡都
+    沒有的；字串要獨立出現（不是更長數字或路徑的一部分，也不是 cd 進去的路徑）；英文片語不能大多
+    是小字、指令字或數字；寫記憶的輸出（memoryctl record、supersede）不算內容相符。
+  - 規則 v4：v1 到 v3 各讀過 30 個「內容相符」的例子後收緊；v5 只改明寫 id 算在哪裡。每一版改了
+    什麼寫在 usage.py。
+- 每週 doctor：計分板的「引用率」改成「使用率」；第二節列出合計、明寫 id、內容相符，各節點的
+  注入／明寫 id／內容相符／使用率，以及注入最多卻從沒被用到的紀錄。AI 自己跑 memoryctl search 的
+  次數與輪次也在同一次讀取裡算（不含在 ~/agent-memory、~/agent-memory-dev 裡工作的 session）。
+  使用率標成估計值；在記憶系統的資料夾（~/agent-memory、~/agent-memory-dev、帳本與這個 repo 的每個
+  worktree，`usage.memory_repo_paths`）裡工作的回合不算進使用率與逐筆計數，另外列一行：那裡 id 是
+  在討論的對象，不是用到的記憶。以「一輪」（一則使用者訊息到下一則）為單位：開啟那一輪的 prompt 的
+  cwd，或那一輪裡 AI 的工具呼叫與輸出的 cwd，有一個在那些資料夾就算（同一個 session 會換資料夾；
+  2026-10-21 那週用 prompt 的 cwd 只認出 72 次注入，加上工具與輸出是 354 次，整個 session 算是 372 次）。
+  評分也照這樣，存在評分紀錄的 memory_repo。
+- 評分（A1）歸給 AI 明寫 id 的紀錄；內容相符的抽樣判讀達到五次對四次以前（`usage.CONTENT_TRUSTED`）
+  不算，排序的「升」也只看近 4 週的明寫次數（舊報告讀引用數）。評分紀錄把明寫與內容相符分開存
+  （explicit_ids、content_ids），記下規則版本；版本不是現行的（或更早沒存的），對話紀錄還在就用現行
+  規則重算，存在 runtime/rating_usage.json（記下規則版本，規則改了就重算），已經不在的用當時存的
+  cited_ids。在記憶系統的資料夾裡評的那幾則不算（feedback.json 的 memory_repo_ratings 記下幾則）。
+  週報逐筆計數是 [注入, 明寫 id, 內容相符] 的清單，舊報告是 dict，兩種都讀（第二份審查 5）。
+- `memoryctl replay --usage-samples N` 隨機列出 N 個內容相符的例子（那筆的特有內容與 AI 輸出的
+  前後文）；AI 輸出含 SECRET_PATTERNS 的不列，email 換成 [email]。
+- 已知限制：子代理的輸出不讀，所以子代理裡的 PreToolUse 注入（2026-10-21 那週 142 筆裡的 14 筆）
+  判不出用到。
+
+### 開場包的偏好占比、未註冊領域的範圍（實際使用回饋改善 F11，2026-10-21）
+
+- 每週 doctor 的「模擬開場包」：任一個 agent 的開場包裡，偏好占預算超過 85% 就 WARN，並列出最長的
+  3 條（只有 id 與 token 數）。偏好比 PROJECT LESSONS 晚裁，偏好太長會把 PROJECT LESSONS 擠掉
+  （Codex 的開場預算 3,400，2026-10-21 以前是 2,800）。
+- 一個還沒註冊來源的專案，它的兩筆偏好只在自己的資料夾生效：machine.json 的 scope_paths 加上
+  project:<名稱>，兩筆改成 scope project:<名稱>，其他專案的開場包就不會帶它們。
 
 ## 資料優先序與信任邊界
 
@@ -476,7 +772,7 @@ decision。這避免「一筆成功就永遠照跑」和「一筆失敗就全盤
   不同查詢詞，但在 572 列的 index 裡「可以」出現在 61 列、「每個」52 列，一句日常提問
   靠兩個虛詞就讓 11 筆無關紀錄過關。另一個方案「只把文件頻率 ≤3%／5% 的詞算進下限」
   量過後不採用：它把真正有意義的高頻內容詞也當成虛詞（「mu」55 列、「報告」57 列、
-  「檢查」65 列），MU 查詢只剩 1 筆無關紀錄，「分數怎麼算」仍是 5 筆。
+  「檢查」65 列），某個股票代號的查詢只剩 1 筆無關紀錄，「分數怎麼算」仍是 5 筆。
 - Record ID、scope、tags 進 lexical identity field；Evidence section 獨立；其餘 Markdown
   進 lexical content field。
 - Semantic passage 是另一個 versioned projection：排除 record title identity、scope、tags、
@@ -499,8 +795,9 @@ FTS5 先以 `bm25()` 取最多 256 rows。硬過濾有兩條：machine visibilit
 experience 是校準用的反證、不是檢索命中，不受門檻限制（每個決策最多 2 筆），前提是
 該決策本身通過門檻。聯邦條目另有配額：cwd 在來源 repo 內最多 3 筆，外面最多 1 筆。
 
-Hook 預算依 agent：adapter 安裝的指令帶 `--agent claude|codex`。Codex 維持開場 2800／
-查詢 1800（它的 `additionalContextLimit` 在 3000 會把較大的 context 寫到磁碟）；Claude
+Hook 預算依 agent：adapter 安裝的指令帶 `--agent claude|codex`。Codex 是開場 3400／
+查詢 1800（它的 `additionalContextLimit` 在 3600 會把較大的 context 寫到磁碟；開場原本是 2800，
+使用者 2026-10-21 調高，因為 critical／high 偏好已占一個專案 Codex 開場包的 97%）；Claude
 Code 是開場 5000／查詢 3000。沒帶 `--agent` 時用 Codex 的保守值。開場包只載入
 priority 為 critical 或 high 的 user-stated 全域偏好；normal／low 改由查詢包在詞彙命中時
 放進 NON-NEGOTIABLE CONSTRAINTS。
@@ -634,7 +931,13 @@ worktree 裡開的 session 也看得到專案教訓。hook 走到的 PROJECT LES
 紀錄（含聯邦條目，以及本輪沒開的節點）與閒置膠囊（state 不是 active，或 30 天沒更新），加
 `--include-archive` 再查被取代的舊版與 event；可用 `--kind`、`--project`、`--since YYYY-MM-DD`、
 `--limit`、`--json` 篩選。計分和節點內相同（identity 24、content 20、evidence 4，每個命中詞），但
-不設門檻，只要 identity 或 content 有一個詞命中就列出；別台機器的紀錄不列。`memoryctl search --id <id>`
+不設門檻，只要 identity 或 content 有一個詞命中就列出；別台機器的紀錄不列。比對與加權（實際使用回饋改善
+F9）：中文雙字照舊在任何位置命中；英數詞只配整個詞，字母與數字以外都算分隔（id 的底線也是），另允許
+s、es、ed、d、ing、er、ers 這幾個字尾與版本號的數字（python 配 python3），所以 play 不配 playwright、
+display，chain 配 chained、不配 chainsaw；兩個字母的詞不加字尾（us 不配 user、ai 不配 aid；檢索審查）；查詢裡相鄰的兩個詞在紀錄裡也相鄰時 +20；從某個專案的目錄查時，那個專案的紀錄 +20、scope
+是別的專案的紀錄 −30 但最低留 1 分（往後排，不會消失：只命中一個詞的 20 分以前會被扣到 0 而丟掉）、不屬於
+任何專案的不變（和路由一樣，先看本專案，別專案往後排）。origin 只表示在哪裡學到，不是適用範圍，global 的
+教訓不扣；`--project` 點名的專案也不扣（檢索審查 4、5）。`memoryctl search --id <id>`
 印出一筆完整紀錄（加 `--include-archive` 連同舊版與 event），路由包的證據指標與決策的「其餘 N 條」都指
 向它。路由開啟且 SOURCE IDS 有紀錄時，包的最後一行是「更多：memoryctl search --query <詞>」
 （不是 `- ` 或 `### ` 開頭，parser 不會當成紀錄；hook 判斷靜默時只看 SOURCE IDS 底下有沒有
@@ -673,9 +976,64 @@ PreToolUse 的注入在 Claude Code transcript 裡是 `hook_additional_context` 
 節點，`memoryctl rate` 的樣本不收（它跟在 assistant 回合後面）。週報另列失敗層：本週注入幾次、
 被引用幾次，以及每條危險清單「擋 n／放行 m／改指令 k/m」。
 
+**送出前的提醒（實際使用回饋改善 F13）。** failure 可另帶選填的 `outbound_triggers`：比對 agent
+說的話、不是它跑的指令的 regex（全稱詞、沒人評估過的時程），寫入與 `validate` 時一樣要能編譯，
+而且不能在會重複多次的部分裡再放長度不定的重複（`(?:\S+\s*)+一定會`、`(\d+\s*)+天`）：這種寫法
+在對不上的文字上會試遍每一種切法，23 個字就要 1.8 秒、每多 2 個字慢 4 倍（F13 審查 1）。
+possessive 重複與 atomic group 不回溯，不受限制；shell 的 `triggers` 不檢查（帳本唯一的一條是
+這個形狀，但每一輪都以 `;` 或 `&&` 開頭、裡面吃不到，是線性的；指令在 PreToolUse 的 2 秒內比對）。
+比對的文字只取前 10,000 與最後 10,000 字（一週的回覆都在 4,000 字內），讀上一則回覆加比對限時
+1 秒：超過就不給那一行，UserPromptSubmit 的 health 記 error、code `reply-time-limit`，記憶包照給。
+Claude Code 的 PreToolUse matcher 是 `Bash|SendMessage|AskUserQuestion`：SendMessage 的
+message 與 summary、AskUserQuestion 的問題與選項文字命中時，以 additionalContext 附上
+`送出的內容可能需要再查：` 與教訓（與指令的失敗同一份 token 預算與 9,500 字上限，最多 2 筆），
+從不擋。agent 直接回給使用者的文字沒有工具可攔，所以下一次 UserPromptSubmit 從 transcript 尾端
+讀上一輪的 assistant 文字（工具結果不讀；先讀最後 256 KB，找不到那一輪之前的 prompt 就放大四倍，最多 4 MB——回覆之後的工具輸出可能有好幾 MB），命中就在最前面加一行
+`上一則回覆可能需要更正：<修法第一句>（id）`，最多 2 行（先篩掉間隔內提醒過的，再取前 2 筆）；
+記憶包沒內容、或這一輪是通知或圖片時就只有這一行。這一行算在 9,500 字上限內，記憶包讓出它的
+長度。「上一則回覆」只算上一個 prompt 之後寫的文字：user 訊息與 agent 工作中排進來的
+queued_command 都是 prompt；transcript 裡已經有這一輪的 prompt 時，用 hook 收到的 prompt 文字
+認出它、跳過，上一個 prompt 之後沒寫字就沒有可查的回覆（F13 審查 4、5）。同一筆在同一 session
+兩次提醒至少隔 5 輪（一輪是 hook 看到的一個 prompt），主 agent 與每個子代理各算各的（審查 6）；主 agent
+送出時剛提醒過的那一筆，同一輪的回覆又講一次，下一輪的更正行不受間隔限制，之後照常間隔（F13 裁示 2，
+outbound.json 的 sent 記下送出時的輪數）；
+`applies: origin` 的只在學到的專案提醒；放不進預算的那筆不算提醒過。狀態在
+`runtime/userprompt/<session>/outbound.json`（只存輪數與 id），讀改寫都在 `outbound.lock` 的鎖
+裡，同一則訊息的兩個 SendMessage 只提醒一次；等鎖超過 1 秒就不提醒（審查 7）。重放把
+送出前的提醒算成注入、不算暫擋，週報第二節列「送出前提醒 N 次，其中同一筆 10 分鐘內重複 M 次」（每筆
+紀錄算一次；每個 UPS 都算一輪，M 偏高再調間隔，F13 裁示 3）；上一則回覆那一行不重放（重放不給 transcript）。Codex 還沒做。
+
+### 產生的檔案（實際使用回饋改善 F14）
+
+`generate.toml`（config home）列出要放在別的工具讀得到的地方的 Markdown 檔，例如某個專案的
+Claude Code 記憶檔。每個目標（`[[target]]`）寫路徑與篩選：kind、origin（紀錄屬於哪個專案：origin 欄位、
+project 範圍，或 id 指到的專案）、scope、id 前綴、tag；寫了的都要成立，同一項任一個值即可。
+帳本是正本，檔案只是畫面：record 或 supersede 寫到目標顯示（或原本顯示）的紀錄之後、以及每週
+doctor，重新產生；內容沒變就不寫。檔頭是目標的 frontmatter、「由記憶系統自動產生，不要手改；
+新增或修改請用 memoryctl record／supersede」，接著依 created_at 列出每筆（可依 tag 分節），
+不寫產生時間，所以紀錄沒變時一個位元組都不變。沒有這行標記的檔案（不是我們寫的）不會被覆蓋，
+要 `memoryctl generate run --adopt` 才接手，原檔先備份；我們寫過、之後被手改的檔案，先備份再重寫。
+備份與上次寫入的雜湊放在 config home（`generate-backups/`、`runtime/generate/`），不放在目標旁邊，
+免得別的工具把備份當成內容讀；目標資料夾不建立、權限不改，檔案保留原本的權限。路徑在 git
+repo 裡（上層資料夾或檔案本身是連到 repo 裡的連結也算，F14 審查 2）、在帳本或 config home 裡的
+目標一律拒絕：產生的檔案從不寫進專案。帳本與 config home 指的是任何一份（有 manifest.json 與 records/
+的資料夾、有 machine.json 的資料夾），不只正在用的那份。`runtime/generate/<name>.json` 記下寫入
+的是哪一份帳本：複製帳本與設定來試草稿時，副本的設定指著真的目標，所以記錄的帳本不是正在跑的
+這份、或檔案有標記卻沒有紀錄時，不覆蓋，狀態 `other-store`（doctor WARN）；正本要接手用
+`--adopt`（原檔先備份成 other-store）。一份帳本從沒寫過、也還不存在的目標，副本仍會建立（F14
+審查 3）。目標本身是連結的拒絕（寫入會把連結換成檔案）。紀錄內容裡的 ``` 區塊原樣保留，只拿掉
+紀錄自己的第一行標題；目標用位元組讀，別種編碼的檔案就是別人的，備份逐位元組複製（CRLF 不變），
+一個目標出錯記下來、下一個照做；同時只有一次產生在讀帳本與寫檔（`runtime/generate/.write-lock`），
+兩個 session 同時寫入時，後產生的那次兩筆都有（F14 審查 8～11）。寫入失敗不會讓 record 或
+supersede 失敗；doctor 的「產生的檔案」檢查列出每個目標做了什麼，手寫檔沒接手、資料夾不存在、
+有人手改過（已備份）或設定有錯時 WARN。
+
 ### Semantic execution boundary
 
 Semantic backend 是 opt-in maintenance + subprocess query：
+
+- 每週 doctor 的向量配對與主題建議（論文借鏡改善 B1）用同一個本機模型與
+  `LocalOnnxEncoder`，但只產生給人審閱的建議，不經過上述的啟用門檻，也不建 index。
 
 - 每個 embedding profile 固定 model ID、revision、ONNX file、byte size、SHA-256、維度、
   max length、pooling、normalization 與 query/passage prefix；完整 contract hash 一併寫進
@@ -981,4 +1339,8 @@ Field-aware retrieval、scope 與 capsule 有 subsystem tests/benchmark 支持�
 - [LLM agent memory 文獻整理](research/llm-agent-memory-literature-review-zh-TW.md)：CoALA、
   MemGPT、Generative Agents、LongMemEval、LoCoMo/LoCoMo-Plus、MemoryBank 等架構與評估
   對本系統的可操作啟示。
+- 論文借鏡改善 v1 借用的論文（arXiv 編號）：REALM（2609.16053）、Memory-R1（2508.19828）、
+  DeltaMem（2606.03083）→ 回饋排序與合併草稿；HORMA（2606.11680）、HiMem（2601.06377）→
+  學到時的對話；TGMS（2607.10265）→ 事實的有效期間；MemPro（2606.00619）→ 可能需要改程式
+  的地方；MemTree（2410.14052）、H-Mem（2605.15701）→ 向量配對與主題建議。
 - Repository tests 與 `docs/evaluation-results.json`：本實作的可重現行為證據。

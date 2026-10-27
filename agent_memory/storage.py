@@ -204,6 +204,11 @@ AGENT_SHELL_TOOLS: dict[str, frozenset[str]] = {
     "claude": frozenset({"Bash"}),
     "codex": frozenset({"Bash"}),
 }
+# Tools that send what the agent wrote to someone: checked against failures'
+# outbound_triggers, never held (spec 實際使用回饋改善 F13). Not Codex yet.
+AGENT_OUTBOUND_TOOLS: dict[str, frozenset[str]] = {
+    "claude": frozenset({"SendMessage", "AskUserQuestion"}),
+}
 
 
 # What git hands a hook about the repository it runs in. A post-commit
@@ -279,11 +284,60 @@ def estimate_tokens(text: str) -> int:
     return cjk + (other + 3) // 4
 
 
+# Claude Code saves a hook context longer than 10,000 characters to a file
+# and gives the agent only its path and a 2,000-character preview (three
+# SessionStart packs of 10,075 to 10,467 characters in one session's
+# transcript, 2026-10-19 and 20; one of 9,930 arrived whole). A token budget
+# allows twice that in English, so a routed Claude hook's context is also
+# kept under this many characters (spec 實際使用回饋改善, F1/F2 review A).
+CLAUDE_HOOK_CHAR_LIMIT = 9_500
+
+
+def hook_chars(text: str) -> int:
+    """A hook context's length as Claude Code counts it: UTF-16 code units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _session_key(session_id: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", session_id):
         return session_id
     digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
     return f"session-{digest}"
+
+
+# When a fact is true in the world, apart from when the system learned it
+# (created_at, updated_at) and when it should be checked again (expires_at)
+# (spec 論文借鏡改善 A3). Both bounds are optional dates, inclusive.
+VALIDITY_FIELDS = ("valid_from", "valid_until")
+
+
+def _day(value: Any) -> date | None:
+    text = str(value or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def validity_problems(kind: str, metadata: dict[str, Any]) -> list[str]:
+    present = [field for field in VALIDITY_FIELDS if metadata.get(field) not in (None, "")]
+    if not present:
+        return []
+    if kind != "fact":
+        return ["valid_from and valid_until are only for fact records"]
+    problems = [f"{field} must be a date (YYYY-MM-DD)" for field in present if _day(metadata[field]) is None]
+    start, end = _day(metadata.get("valid_from")), _day(metadata.get("valid_until"))
+    if not problems and start and end and start > end:
+        problems.append("valid_from must not be after valid_until")
+    return problems
+
+
+def no_longer_true(metadata: dict[str, Any], today: date | None = None) -> bool:
+    """A fact whose valid_until has passed: known not to hold any more."""
+    end = _day(metadata.get("valid_until")) if metadata.get("kind") == "fact" else None
+    return end is not None and end < (today or date.today())
 
 
 def _is_expired(value: Any) -> bool:
@@ -341,6 +395,20 @@ ROUTER_DEFAULT_KNOWLEDGE_MAX_TOPICS = 2
 # Extracted command phrases too common to mean a failure is near (spec 8.0
 # ruling 32); explicit triggers are never filtered.
 ROUTER_DEFAULT_PHRASE_STOPLIST = ["git status", "git add", "git fetch", "git log", "git diff", "gh api", "ls", "cat", "cd"]
+# A Chinese bigram holding one of these is a fragment such as 的記 or 在的,
+# not a word: it never counts toward a record's relevance (spec
+# 實際使用回饋改善 F3). English function words are already query stopwords.
+ROUTER_DEFAULT_FUNCTION_CHARS = "的了是在嗎呢吧啊喔呀著和與及或而並就也都很把被這那"
+# Words of conversation, not of a subject: taken out of a prompt before it is
+# routed, so 繼續 alone opens nothing (designer 2026-10-21). Only words of two
+# or more characters: one character (好, 對) is part of other words (好處, 對手).
+ROUTER_DEFAULT_FILLER_WORDS = ("繼續", "好的", "好喔", "可以", "謝謝", "收到", "沒問題", "了解", "知道了", "是的",
+                               "ok", "okay", "thanks", "thank you")
+# A word in fewer than this share of the records is uncommon; in a small
+# ledger, where that share is less than a handful, so is a word in fewer than
+# RARE_MIN_DOCS records.
+ROUTER_DEFAULT_RARE_SHARE = 0.05
+ROUTER_DEFAULT_RARE_MIN_DOCS = 5
 # The removal order names knowledge topics 0 and 1; more seats are not served.
 ROUTER_MAX_KNOWLEDGE_TOPICS = 2
 
@@ -433,6 +501,8 @@ def router_defaults() -> dict[str, Any]:
         "speed_bumps": None,
         "speed_bump_failures": {},
         "phrase_stoplist": list(ROUTER_DEFAULT_PHRASE_STOPLIST),
+        "relevance": {"function_chars": ROUTER_DEFAULT_FUNCTION_CHARS, "rare_share": ROUTER_DEFAULT_RARE_SHARE,
+                      "rare_min_docs": ROUTER_DEFAULT_RARE_MIN_DOCS, "filler_words": list(ROUTER_DEFAULT_FILLER_WORDS)},
         "code": None,
         "problems": [],
         "source": "default",
@@ -446,7 +516,7 @@ def _string_list(value: Any, where: str) -> list[str]:
 
 
 ROUTER_TOP_LEVEL_KEYS = frozenset(
-    {"enabled", "knowledge_max_topics", "budgets", "project_tokens", "cwd_topics", "knowledge", "failures"}
+    {"enabled", "knowledge_max_topics", "budgets", "project_tokens", "cwd_topics", "knowledge", "failures", "relevance"}
 )
 
 
@@ -536,6 +606,33 @@ def _parse_router_toml(data: dict[str, Any]) -> dict[str, Any]:
             settings["topics"] = parsed
         except RouterTomlInvalid as exc:
             problems.append(f"{exc}; the topic word lists use the defaults")
+    relevance = data.get("relevance", {})
+    if not isinstance(relevance, dict):
+        problems.append("relevance must be a table; relevance uses the defaults")
+        relevance = {}
+    if "function_chars" in relevance:
+        if isinstance(relevance["function_chars"], str) and relevance["function_chars"].strip():
+            settings["relevance"]["function_chars"] = "".join(relevance["function_chars"].split())
+        else:
+            problems.append("relevance.function_chars must be a non-empty string; the default list applies")
+    if "rare_share" in relevance:
+        share = relevance["rare_share"]
+        if isinstance(share, (int, float)) and not isinstance(share, bool) and 0 < share < 1:
+            settings["relevance"]["rare_share"] = float(share)
+        else:
+            problems.append("relevance.rare_share must be a number between 0 and 1; the default applies")
+    if "filler_words" in relevance:
+        try:
+            settings["relevance"]["filler_words"] = [word.strip() for word in _string_list(relevance["filler_words"], "relevance.filler_words")
+                                                     if word.strip()]
+        except RouterTomlInvalid as exc:
+            problems.append(f"{exc}; the default filler words apply")
+    if "rare_min_docs" in relevance:
+        floor = relevance["rare_min_docs"]
+        if isinstance(floor, int) and not isinstance(floor, bool) and floor >= 0:
+            settings["relevance"]["rare_min_docs"] = floor
+        else:
+            problems.append("relevance.rare_min_docs must be a whole number of records; the default applies")
     failures = data.get("failures", {})
     if not isinstance(failures, dict):
         problems.append("failures must be a table")

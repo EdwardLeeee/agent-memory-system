@@ -136,11 +136,17 @@ class LocalOnnxEncoder:
         profile: EmbeddingProfile,
         *,
         threads: int = 2,
+        max_length: int | None = None,
     ) -> None:
         import numpy as np
         import onnxruntime as ort
         from tokenizers import AddedToken, Tokenizer
 
+        # onnxruntime 1.31 can send telemetry events and keeps a device id
+        # (F17); the pinned 1.23.2 has neither. Off wherever the version can
+        # turn it off, so an upgrade adds none (designer 2026-10-22).
+        if hasattr(ort, "disable_telemetry_events"):
+            ort.disable_telemetry_events()
         self._np = np
         self.profile = profile
         options = ort.SessionOptions()
@@ -164,7 +170,7 @@ class LocalOnnxEncoder:
             (model_root / "special_tokens_map.json").read_text(encoding="utf-8")
         )
         tokenizer = Tokenizer.from_file(str(model_root / "tokenizer.json"))
-        tokenizer.enable_truncation(max_length=profile.max_length)
+        tokenizer.enable_truncation(max_length=max_length or profile.max_length)
         if not tokenizer.padding:
             tokenizer.enable_padding(
                 pad_id=int(config.get("pad_token_id", 0)),

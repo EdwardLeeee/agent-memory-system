@@ -285,7 +285,7 @@ class ParserFixtureTests(unittest.TestCase):
         _init_fixture_repo(signal_repo)
         (signal_repo / "research").mkdir()
         (signal_repo / "research" / "errata.md").write_text(
-            "# 勘誤內容：SOXQ v9\n\n"
+            "# 勘誤內容：ETFX v9\n\n"
             "## 一、錯在哪裡（兩份報告同一個根因）\n\n組合倍數把新台幣當美元。\n\n"
             "## 更正（2026-09-22）：上面的結論是錯的\n\n錯在抓取方式。\n\n"
             "## 四、給 RD 的備註\n\n這份勘誤請照抄進結算檔。\n\n"
@@ -469,6 +469,67 @@ class HeadingLevelTests(unittest.TestCase):
                 load_source_config(home, "demo")
 
 
+class HalfLifeTests(unittest.TestCase):
+    """An old brief counts for less in the routed pack (spec 實際使用回饋改善 F7)."""
+
+    def test_half_life_days_is_a_whole_number_of_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "sources.d").mkdir()
+
+            def load(value: str) -> dict:
+                (home / "sources.d" / "demo.toml").write_text(
+                    f'[source]\nrepo = "{home}"\naffinity = ["project:demo"]\n\n'
+                    f'[[parser]]\nkind = "markdown-note"\nglob = "docs/briefs/*.md"\nhalf_life_days = {value}\n',
+                    encoding="utf-8",
+                )
+                return load_source_config(home, "demo")
+
+            self.assertEqual(14, load("14")["parsers"][0]["half_life_days"])
+            for wrong in ("0", '"14"'):
+                with self.assertRaises(FederationConfigError):
+                    load(wrong)
+
+    def test_a_brief_last_committed_long_ago_gives_way_to_a_fresh_one(self) -> None:
+        import os
+        import sys
+        from datetime import datetime, timedelta, timezone
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import router_baseline
+        from agent_memory import core
+
+        def commit(repo: Path, name: str, text: str, when: datetime) -> None:
+            (repo / "research" / name).write_text(text, encoding="utf-8")
+            stamp = when.isoformat()
+            env = {**os.environ, "GIT_AUTHOR_NAME": "f", "GIT_AUTHOR_EMAIL": "f@example.invalid", "GIT_COMMITTER_NAME": "f",
+                   "GIT_COMMITTER_EMAIL": "f@example.invalid", "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", name], check=True, env=env)
+
+        def pack(half_life: bool) -> str:
+            with router_baseline.environment() as paths:
+                now = datetime.now(timezone.utc)
+                commit(paths["alpha"], "2026-07-01-pumice.md", "# Pumice\n\n## Pumice glaze firing\n\n"
+                       "Pumice glaze firing uses cone six and a slow cool.\n", now - timedelta(days=70))
+                commit(paths["alpha"], "2026-10-20-pumice.md", "# Pumice\n\n## Pumice glaze firing\n\n"
+                       "Pumice glaze firing uses cone five and a fast cool.\n", now - timedelta(days=1))
+                if half_life:
+                    config = paths["config"] / "sources.d" / "alpha.toml"
+                    config.write_text(config.read_text(encoding="utf-8").replace(
+                        'glob = "research/*.md"', 'glob = "research/*.md"\nhalf_life_days = 14'), encoding="utf-8")
+                core.reindex(paths["memory"])
+                output = core.handle_hook(paths["memory"], "user-prompt-submit", {
+                    "session_id": "s1", "cwd": str(paths["alpha"]), "hook_event_name": "UserPromptSubmit",
+                    "prompt": "pumice glaze firing cone"}, agent="claude")
+                return output.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+        with_half_life, without = pack(True), pack(False)
+        self.assertIn("cone five", with_half_life)
+        self.assertNotIn("cone six", with_half_life)  # 70 days at 14: x0.03, under the node's floor
+        self.assertIn("cone six", without)
+
+
 class ExampleConfigTests(unittest.TestCase):
     def test_the_example_source_config_loads(self) -> None:
         example = Path(__file__).resolve().parents[1] / "docs" / "sources.example.toml"
@@ -482,7 +543,9 @@ class ExampleConfigTests(unittest.TestCase):
             )
             config = load_source_config(base, "my-app")
         self.assertEqual("origin/main", config["ref"])
-        self.assertEqual(["adr", "markdown-note", "markdown-note", "settlement", "git-log"], [p["kind"] for p in config["parsers"]])
+        self.assertEqual(["adr", "markdown-note", "markdown-note", "markdown-note", "settlement", "git-log"],
+                         [p["kind"] for p in config["parsers"]])
+        self.assertEqual([14], [p["half_life_days"] for p in config["parsers"] if "half_life_days" in p])
 
 
 class SourceRefTests(unittest.TestCase):

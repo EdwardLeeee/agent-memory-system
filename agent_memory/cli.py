@@ -79,8 +79,21 @@ def parser() -> argparse.ArgumentParser:
     remember.add_argument("--input", required=True)
 
     resume = commands.add_parser("checkpoint")
-    resume.add_argument("--input", required=True)
+    resume.add_argument("--input")
     resume.add_argument("--session-id")
+    # Change the saved capsule in place, no file needed (F10, T5).
+    resume.add_argument("--set", action="append", metavar="FIELD=VALUE",
+                        help="a capsule field, tasks.<id>.<title|status|waiting_on>, or tasks.<id>= to remove one")
+    resume.add_argument("--show", action="store_true", help="print this session's capsule")
+
+    skeleton = commands.add_parser("template", help="print the JSON skeleton of a write")
+    skeleton.add_argument("kind")
+
+    todo = commands.add_parser("task", help="tasks with a due time")
+    todo_commands = todo.add_subparsers(dest="task_command", required=True)
+    todo_done = todo_commands.add_parser("done", help="mark a task done (a new version, as a supersede)")
+    todo_done.add_argument("id")
+    todo_done.add_argument("--reason")
 
     replace = commands.add_parser("supersede")
     replace.add_argument("--id", required=True)
@@ -130,6 +143,11 @@ def parser() -> argparse.ArgumentParser:
     )
     search.add_argument("--query", help="words to look for")
     search.add_argument("--id", help="print one record in full")
+    search.add_argument("--as-of", help="facts only: those that held on this date (YYYY-MM-DD), by valid_from/valid_until and older versions")
+    search.add_argument(
+        "--context", action="store_true",
+        help="with --id: the conversation the record was learned in (the user's message before it was written and the AI's reply after)",
+    )
     search.add_argument("--kind", choices=sorted(ALLOWED_KINDS | {"note"}))
     search.add_argument("--project", help="only records of project:<name>")
     search.add_argument("--since", help="only records updated on or after YYYY-MM-DD")
@@ -172,7 +190,8 @@ def parser() -> argparse.ArgumentParser:
     lesson_promote.add_argument("--rule", required=True)
 
     doctor = commands.add_parser("doctor")
-    doctor.add_argument("action", nargs="?", choices=("run", "install-timer"), default="run")
+    doctor.add_argument("action", nargs="?", choices=("run", "install-timer", "dismiss"), default="run")
+    doctor.add_argument("ids", nargs="*", help="dismiss: records that are not one lesson; no merge draft for them again")
     doctor.add_argument("--notify", action="store_true")
     doctor.add_argument("--no-tests", action="store_true")
     doctor.add_argument("--report-dir")
@@ -181,6 +200,30 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--enable", action="store_true", help="also enable the timer (needs the user's approval)")
     doctor.add_argument("--now", help=argparse.SUPPRESS)
 
+    learned_in = commands.add_parser(
+        "learned-in", help="find, in the agents' transcripts, the session that wrote each existing record"
+    )
+    learned_in.add_argument("action", choices=("backfill",))
+    learned_in.add_argument("--claude-dir", help="Claude Code transcripts (default ~/.claude/projects)")
+    learned_in.add_argument("--codex-dir", help="Codex transcripts (default ~/.codex/sessions)")
+    learned_in.add_argument("--days", type=int, help="only transcripts changed in the last N days")
+    replay = commands.add_parser(
+        "replay", help="measure what the hooks inject over real sessions: as recorded, or replayed by code trees on a copy"
+    )
+    replay.add_argument("--days", type=int, default=7)
+    replay.add_argument("--claude-dir", help="Claude Code transcripts (default ~/.claude/projects and ~/.claude-profiles/*/projects)")
+    replay.add_argument("--codex-dir", help="Codex transcripts (default ~/.codex/sessions)")
+    replay.add_argument("--session", action="append", default=[], help="only sessions whose id starts with this")
+    replay.add_argument("--code", action="append", default=[],
+                        help="a code tree to replay on a copy of the ledger and configuration (repeatable)")
+    replay.add_argument("--json", help="also write the numbers to this file (record ids and counts, no message text)")
+    replay.add_argument("--watch", action="append", default=[], metavar="ID",
+                        help="also count where this record was injected, by kind of turn and session")
+    replay.add_argument("--usage-samples", type=int, metavar="N",
+                        help="print N random content matches of the usage rule, to check them by eye")
+    replay.add_argument("--fidelity", type=int, metavar="N",
+                        help="replay N sampled events on the program and records live had then, and explain every difference")
+    replay.add_argument("--now", help=argparse.SUPPRESS)
     rate = commands.add_parser("rate")
     rate.add_argument("--summary", action="store_true")
     rate.add_argument("--projects-dir")
@@ -204,6 +247,16 @@ def parser() -> argparse.ArgumentParser:
     sources_hook = sources_commands.add_parser("install-hook")
     sources_hook.add_argument("name")
 
+    # Markdown views of the ledger where another tool reads them (F14).
+    generate = commands.add_parser("generate")
+    generate_commands = generate.add_subparsers(dest="generate_command", required=True)
+    generate_commands.add_parser("list")
+    generate_run = generate_commands.add_parser("run")
+    generate_run.add_argument("--name", action="append")
+    generate_run.add_argument("--adopt", action="store_true",
+                              help="replace a file the memory system did not write, after backing it up")
+    generate_run.add_argument("--dry-run", action="store_true")
+
     commands.add_parser("validate")
     commands.add_parser("reindex")
     return result
@@ -214,6 +267,23 @@ def _run_doctor(root: Path, args: argparse.Namespace) -> int:
 
     from . import doctor
 
+    if args.ids and args.action != "dismiss":
+        raise MemoryError("record ids are only for doctor dismiss")
+    if args.action == "dismiss":
+        from . import merge_drafts
+
+        ids = list(dict.fromkeys(args.ids))
+        if len(ids) < 2:
+            raise MemoryError("doctor dismiss needs two or more record ids")
+        missing = [record_id for record_id in ids if merge_drafts._load(root, record_id) is None]
+        if missing:
+            raise MemoryError(f"no active record: {', '.join(missing)}")
+        if merge_drafts.dismiss(config_home(), ids, datetime.now(timezone.utc)):
+            print(f"Dismissed {len(ids)} records as not one lesson; doctor drafts no merge for them again "
+                  f"({merge_drafts.dismissed_path(config_home())})")
+        else:
+            print("Already dismissed together; nothing changed")
+        return 0
     if args.action == "install-timer":
         memoryctl = Path(__file__).resolve().parents[1] / "bin" / "memoryctl"
         service, timer = doctor.install_timer(
@@ -282,6 +352,73 @@ def _record_source_sync(name: str, config: dict, entries: int, tree: Any = None)
         pass
 
 
+def _run_replay(root: Path, args: argparse.Namespace) -> int:
+    from datetime import datetime, timedelta, timezone
+
+    from . import replay
+    from .pretool import cwd_projects
+    from .storage import atomic_write_text
+
+    now = datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else datetime.now(timezone.utc)
+    claude_dir = Path(args.claude_dir).expanduser() if args.claude_dir else replay.default_claude_dirs()
+    codex_dir = Path(args.codex_dir).expanduser() if args.codex_dir else replay.default_codex_dir()
+    files = replay.transcript_files(claude_dir, codex_dir, now, args.days)
+    window = replay.Window(now - timedelta(days=args.days), set(args.session) or None)
+    if args.fidelity:
+        checked = replay.fidelity(files, root, config_home(), args.fidelity, now=now, window=window)
+        print(f"## 重放吻合率：抽 {checked['sampled']} 個事件（紀錄裡被擋下的 {checked['holds']} 個）、"
+              f"{checked['versions']} 個當時的版本；比帳本最新 commit 還晚的 {checked['after_ledger']} 個事件不抽")
+        for result, count in sorted(checked["results"].items(), key=lambda kv: -kv[1]):
+            how = replay.VERIFIED_BY.get(result)
+            print(f"- {'相同' if result == 'same' else replay.CAUSES.get(result, result)}：{count}"
+                  + (f"（驗證：{how}）" if how else ""))
+        unknown = checked["results"].get("unknown", 0)
+        print(f"- 合計：已解釋 {checked['sampled'] - checked['unverified'] - unknown}、未驗證 {checked['unverified']}、"
+              f"原因不明 {unknown}")
+        for item in checked["differing"]:
+            only_actual = sorted(set(item["actual"] or ()) - set(item["replayed"] or ()))
+            only_replay = sorted(set(item["replayed"] or ()) - set(item["actual"] or ()))
+            pointed = sorted(set(item.get("pointers") or ()) ^ set(item.get("replayed_pointers") or ()))
+            linked = (f"；指標只在一邊 {pointed}" if pointed else "") + "".join(
+                f"；較早只有{'重放' if side == 'replay' else '實際'}給過 {record_id}（{at[:16]}）"
+                for record_id, (side, at) in sorted((item.get("given_apart") or {}).items())) + "".join(
+                f"；來源照當時的 commit 重放相同（{name} {commit[:8]}）" for name, commit in sorted((item.get("pinned") or {}).items()))
+            print(f"  - [{item['result']}] {item['stratum']} {item['session'][:8]} {item['at'][:16]} v{item['version']}："
+                  f"只在實際 {only_actual}；只在重放 {only_replay}{linked}")
+        if args.json:
+            atomic_write_text(Path(args.json).expanduser(), json.dumps(checked, ensure_ascii=False, indent=1) + "\n")
+        return 0
+    if args.usage_samples:
+        measured = replay.measure_actual(files, root, lambda cwd: cwd_projects(cwd, root), window, None, args.usage_samples)
+        samples = measured.get("evidence") or []
+        print(f"## 判斷規則的「內容相符」抽樣：{len(samples)} 個（AI 輸出裡含祕密的不列；email 換成 [email]）")
+        for number, item in enumerate(samples, start=1):
+            print(f"{number}. {item['id']}｜{'原文片語' if item['kind'] == 'phrase' else '特有字串'}：{item['feature']}")
+            print(f"   AI 輸出：…{item['agent']}…")
+        return 0
+    if args.code:
+        result = replay.replay(files, root, config_home(), [Path(code).expanduser().resolve() for code in args.code], window,
+                               set(args.watch))
+    else:
+        result = {"actual": replay.measure_actual(files, root, lambda cwd: cwd_projects(cwd, root), window, set(args.watch)),
+                  "codes": {}}
+    result["actual"]["missing"] = replay.missing_folders(claude_dir, codex_dir)
+    print(f"## 紀錄裡實際的注入（近 {args.days} 天）")
+    for line in replay.reading_lines(result["actual"]) + replay.summary_lines(result["actual"]) + replay.watch_lines(result["actual"]):
+        print(line)
+    for code, measured in result["codes"].items():
+        fidelity = measured["fidelity"]
+        print("")
+        print(f"## 用 {code} 重放")
+        print(f"- 送出 {measured['hook_events']:,} 個 hook 事件，出錯 {measured['hook_errors']:,} 個；"
+              f"UPS 注入的紀錄和實際相同：{fidelity['same_records']:,}/{fidelity['ups_events']:,}")
+        for line in replay.summary_lines(measured, result["actual"], "實際") + replay.watch_lines(measured):
+            print(line)
+    if args.json:
+        atomic_write_text(Path(args.json).expanduser(), json.dumps(result, ensure_ascii=False, indent=1) + "\n")
+    return 0
+
+
 def _run_rate(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
 
@@ -306,7 +443,10 @@ def _run_rate(args: argparse.Namespace) -> int:
                 print(f"  {item['id']}  ×{item['count']}")
         return 0
     projects_dir = Path(args.projects_dir) if args.projects_dir else rating.default_projects_dir()
-    candidates = rating.collect_candidates(projects_dir, now, args.days)
+    from . import usage
+
+    detector = usage.UsageDetector(usage.FeatureFrequency.from_index(memory_home(args.home)))
+    candidates = rating.collect_candidates(projects_dir, now, args.days, detector, memory_home(args.home))
     items = rating.sample(
         candidates, rating.already_rated_keys(config_root, now), rating.iso_week(now)
     )
@@ -314,9 +454,32 @@ def _run_rate(args: argparse.Namespace) -> int:
         print("最近沒有可以評分的訊息。")
         return 0
     print(f"本週評分：{len(items)} 題。回答只存在這台電腦，不會進 Git，也不會給 AI 看。")
-    results = rating.run_interactive(items, input, print, now)
-    path = rating.save_ratings(config_root, rating.iso_week(now), results)
-    print(f"已存 {len(results)} 題到 {path}")
+    print("d、r、m 只是多看一點，不算作答：d 看記憶全文、r 看 AI 當時的回答、m 看完整訊息。")
+    week = rating.iso_week(now)
+    path = rating.ratings_dir(config_root) / f"{week}.json"
+    saved: list[dict[str, Any]] = []
+
+    def save(result: dict[str, Any]) -> None:
+        # Each answer is written at once, so stopping halfway keeps it.
+        rating.save_ratings(config_root, week, [result])
+        saved.append(result)
+
+    try:
+        names = {m["session_id"]: m["session_name"] for m in candidates if m.get("session_name")}
+        rating.run_interactive(items, input, print, now, root=memory_home(args.home), save=save, names=names)
+    except (KeyboardInterrupt, EOFError):
+        print("")
+    print(f"已存 {len(saved)} 題到 {path}")
+    if saved:
+        # The ranking feedback follows the new ratings at once (A1).
+        from . import doctor as doctor_module
+        from . import feedback
+
+        try:
+            feedback.rebuild(config_root, now, doctor_module.resolve_report_dir(config_root), projects_dir=projects_dir,
+                             root=memory_home(args.home))
+        except Exception:
+            pass
     return 0
 
 
@@ -334,10 +497,45 @@ def main(argv: list[str] | None = None) -> int:
             record_id = record(root, args.kind, _read_input(args.input))
             print(f"Recorded {record_id}")
             return 0
+        if args.command == "task":
+            from .core import task_done
+
+            old_version, event_id = task_done(root, args.id, args.reason)
+            print(f"Marked {args.id} done; version {old_version} archived; event {event_id}")
+            return 0
+        if args.command == "template":
+            from .forms import TEMPLATE_KINDS, template
+
+            if args.kind not in TEMPLATE_KINDS:
+                raise MemoryError(f"template takes one of: {', '.join(TEMPLATE_KINDS)}")
+            print(json.dumps(template(args.kind), ensure_ascii=False, indent=2))
+            return 0
         if args.command == "checkpoint":
+            from .core import CAPSULE_LIMIT, CAPSULE_WARN, capsule_payload, checkpoint_report
+
             session_id = current_session_id(args.session_id)
-            path = checkpoint(root, _read_input(args.input), session_id)
+            if args.show:
+                path, _ = capsule_payload(root, session_id)
+                print(path.read_text(encoding="utf-8"), end="")
+                return 0
+            if not args.input and not args.set:
+                raise MemoryError("checkpoint needs --input, --set or --show")
+            # Without --input, the saved capsule is read and changed under the
+            # write lock, so two --set at once both land (review 2, item 8).
+            payload = _read_input(args.input) if args.input else None
+            path, report = checkpoint_report(root, payload, session_id, args.set or [])
             print(f"Checkpointed current task at {path}")
+            if report["dropped_events"]:
+                print(f"dropped the {report['dropped_events']} oldest resume_point events to stay under {CAPSULE_LIMIT} bytes "
+                      "(git keeps the earlier versions):", file=sys.stderr)
+                for head in report["dropped_heads"]:
+                    print(f"  - {head}", file=sys.stderr)
+            if report["dropped_done"]:
+                print(f"dropped {report['dropped_done']} done tasks past the newest three", file=sys.stderr)
+            if report["bytes"] > CAPSULE_WARN:
+                print(f"warning: the capsule is {report['bytes']} of {CAPSULE_LIMIT} bytes; merge resume_point's events "
+                      "into fewer, or move work items to tasks (checkpoint --set tasks.<id>.title=... "
+                      "--set tasks.<id>.status=doing)", file=sys.stderr)
             return 0
         if args.command == "supersede":
             old_version, event_id = supersede(root, args.id, _read_input(args.input))
@@ -498,23 +696,53 @@ def main(argv: list[str] | None = None) -> int:
 
             from . import history
 
+            if args.as_of:
+                try:
+                    day = _date.fromisoformat(args.as_of)
+                except ValueError as exc:
+                    raise MemoryError("--as-of must be YYYY-MM-DD") from exc
+                if args.id:
+                    raise MemoryError("--as-of lists facts; it does not take --id")
+                print(history.format_as_of(history.as_of(root, day, args.query), day), end="")
+                return 0
             if bool(args.query) == bool(args.id):
                 raise MemoryError("search needs exactly one of --query or --id")
             if args.id:
+                if args.context:
+                    from . import learned
+
+                    print(learned.context_text(root, args.id), end="")
+                    return 0
                 print(history.show(root, args.id, include_archive=args.include_archive), end="")
                 return 0
+            if args.context:
+                raise MemoryError("--context needs --id")
             try:
                 since = _date.fromisoformat(args.since) if args.since else None
             except ValueError as exc:
                 raise MemoryError("--since must be YYYY-MM-DD") from exc
             hits = history.search(
                 root, args.query, kind=args.kind, project=args.project, since=since,
-                include_archive=args.include_archive, limit=args.limit,
+                include_archive=args.include_archive, limit=args.limit, cwd=Path.cwd(),
             )
             if args.json:
                 print(json.dumps({"count": len(hits), "hits": hits}, ensure_ascii=False, indent=2))
             else:
                 print(history.format_hits(hits), end="")
+            return 0
+        if args.command == "learned-in":
+            from . import learned
+
+            summary = learned.backfill(
+                root,
+                Path(args.claude_dir).expanduser() if args.claude_dir else None,
+                Path(args.codex_dir).expanduser() if args.codex_dir else None,
+                args.days,
+            )
+            print(
+                f"讀了 {summary['files_scanned']} 份對話紀錄，新找到 {summary['events']} 次寫入；"
+                f"快取裡共有 {summary['records']} 筆紀錄知道是在哪個 session 學到的。"
+            )
             return 0
         if args.command == "context":
             if args.agent and args.budget_tokens is not None:
@@ -632,6 +860,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(f"Promoted {args.derived_id} to canonical lesson {canonical_id}")
                 return 0
+        if args.command == "replay":
+            return _run_replay(root, args)
         if args.command == "rate":
             return _run_rate(args)
         if args.command == "doctor":
@@ -657,6 +887,33 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     print(f"    {item['value']}")
             return 0
+        if args.command == "generate":
+            from .generate import load_targets, run as run_generate
+
+            if args.generate_command == "list":
+                targets, problems = load_targets()
+                outcome = {row["name"]: row for row in run_generate(root, dry_run=True)["targets"]}
+                if not targets and not problems:
+                    print("No files configured (generate.toml).")
+                for target in targets:
+                    row = outcome.get(target["name"], {})
+                    filters = " ".join(f"{key}={','.join(values)}" for key, values in target["filters"].items())
+                    print(f"{target['name']}: {target['path']}\n  {filters}; {row.get('records', 0)} records; "
+                          f"next run: {row.get('status', '?')}" + (f" (backs up: {row['backup']})" if row.get("backup") else ""))
+                for problem in problems:
+                    print(f"problem: {problem}", file=sys.stderr)
+                return 1 if problems else 0
+            result = run_generate(root, args.name, adopt=args.adopt, dry_run=args.dry_run)
+            for row in result["targets"]:
+                print(f"{row['name']}: {row['status']}{' (dry run)' if row.get('dry_run') else ''}, {row['records']} records"
+                      + (f"; written by the ledger at {row['writer']}" if row.get("writer") else "")
+                      + (f"; generate.toml is for the ledger at {row['store']}" if row.get("store") else "")
+                      + (f"; backed up to {row['backup']}" if row.get("backup") and not row.get("dry_run") else "")
+                      + (f"; would back up ({row['backup']})" if row.get("backup") and row.get("dry_run") else ""))
+            for problem in result["problems"]:
+                print(f"problem: {problem}", file=sys.stderr)
+            return 1 if result["problems"] or any(row["status"] in ("hand-written", "other-store", "missing-folder", "error")
+                                                  for row in result["targets"]) else 0
         if args.command == "sources":
             if args.sources_command == "list":
                 names = list_source_configs(config_home())
@@ -675,6 +932,16 @@ def main(argv: list[str] | None = None) -> int:
                     raise MemoryError(str(exc)) from exc
                 from .federation import SourceTree, ref_is_remote
 
+                # The commit a session just made, noted before any fetch can hang (T6).
+                try:
+                    from datetime import datetime as _datetime, timezone as _timezone
+
+                    from .commits import note_commit
+
+                    note_commit(config_home(), args.name, config["repo"], Path.cwd(), current_session_id(),
+                                _datetime.now(_timezone.utc))
+                except Exception:
+                    pass
                 ref = config.get("ref")
                 fetched = fetch_source_ref(config) if ref_is_remote(ref, config["repo"]) else None
                 tree = SourceTree(config["repo"], ref)
